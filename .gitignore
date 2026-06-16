@@ -1,0 +1,10 @@
+.pio/
+.vscode/
+.mxproject
+YYT_MiniOdrive/build/
+YYT_MiniOdrive/MDK-ARM/turing_CBU6/
+*.bin
+*.elf
+*.hex
+*.o
+*.d

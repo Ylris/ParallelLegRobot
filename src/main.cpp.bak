@@ -1,0 +1,256 @@
+#include <Arduino.h>
+#include "MyServo.h"
+#include "LegConfig.h"
+#include "LegKinematics.h"
+#include "ImuManager.h"
+
+// 舵机对象 (使用自定义 MyServo 驱动以防 ESP32-C3 核心 API 冲突)
+MyServo leftServo;
+MyServo rightServo;
+
+// 运动学与传感器对象
+LegKinematics kinematics;
+ImuManager imu;
+
+// 运行模式定义
+enum MotionMode {
+    MODE_STANDBY,     // 静态悬停在 (0, -100)
+    MODE_CIRCLE,      // 绘制圆形轨迹
+    MODE_WALK,        // 模拟步态轨迹 (D-型轨迹)
+    MODE_BALANCE,     // IMU 自适应反馈平衡模式
+    MODE_INTERACTIVE  // 串口控制模式
+};
+
+MotionMode currentMode = MODE_CIRCLE;
+
+// 轨迹生成参数
+float timeStep = 0.0f;
+const float PI_VAL = 3.14159265f;
+
+// 目标点
+float targetX = 0.0f;
+float targetY = -100.0f;
+
+// 打印当前状态的时间控制
+unsigned long lastPrintTime = 0;
+
+// 函数声明
+void processSerialInput();
+void executeTrajectory();
+bool moveToPosition(float x, float y);
+void updateBreathingLed();
+
+void setup() {
+    // 初始化串口，使用硬件串口，不带 ARDUINO_USB_CDC_ON_BOOT 标志以输出到板载 UART 芯片
+    Serial.begin(115200);
+    delay(1000);
+    Serial.println("\n==============================================");
+    Serial.println("ESP32-C3 Parallel Leg Robot + IMU Init...");
+    Serial.println("==============================================");
+
+    // 1. 初始化 IMU
+    imu.begin();
+
+    // 2. 绑定舵机引脚并初始化 (引脚已更新为 GPIO 2 / GPIO 3)
+    leftServo.attach(LEFT_SERVO_PIN, 0); // 分配 LEDC 通道 0 (对于 2.x)
+    rightServo.attach(RIGHT_SERVO_PIN, 1); // 分配 LEDC 通道 1
+
+    Serial.printf("Left Servo attached to Pin %d\n", LEFT_SERVO_PIN);
+    Serial.printf("Right Servo attached to Pin %d\n", RIGHT_SERVO_PIN);
+
+    // 初始位置
+    moveToPosition(0, -100);
+    Serial.println("Robot leg initialized to standby position (0, -100)");
+
+    // 4. 初始化板载 LED
+    pinMode(LED_PIN, OUTPUT);
+
+    // 打印菜单
+    Serial.println("\n可用的控制指令:");
+    Serial.println("  'standby'     - 保持在中位 (0, -100)");
+    Serial.println("  'circle'      - 循环画圆轨迹");
+    Serial.println("  'walk'        - 循环步态轨迹");
+    Serial.println("  'balance'     - 开启 IMU 反馈自平衡 (根据 Pitch 自动偏移)");
+    Serial.println("  'X Y'         - 手动坐标控制 (例如: '10 -90' 或 '-5 -110')");
+    Serial.println("==============================================");
+}
+
+void loop() {
+    // 1. 更新 IMU 姿态角
+    imu.update();
+
+    // 2. 处理串口输入
+    processSerialInput();
+
+    // 3. 根据模式执行轨迹或控制
+    executeTrajectory();
+
+    // 4. 更新板载 LED 呼吸灯
+    updateBreathingLed();
+
+    // 5. 延时控制更新频率 (约 50Hz, 20ms)
+    delay(20);
+}
+
+// 驱动机器人足端移动到目标 (x, y) 坐标
+bool moveToPosition(float x, float y) {
+    // 限幅检查，防止超出工作空间损坏结构
+    if (x < LIMIT_X_MIN) x = LIMIT_X_MIN;
+    if (x > LIMIT_X_MAX) x = LIMIT_X_MAX;
+    if (y < LIMIT_Y_MIN) y = LIMIT_Y_MIN;
+    if (y > LIMIT_Y_MAX) y = LIMIT_Y_MAX;
+
+    float theta1, theta2;
+    // 逆运动学求解
+    if (kinematics.inverseKinematics(x, y, theta1, theta2)) {
+        float servo1_deg, servo2_deg;
+        // 映射为舵机角度
+        kinematics.mapAnglesToServos(theta1, theta2, servo1_deg, servo2_deg);
+
+        // 写入舵机
+        leftServo.write(servo1_deg);
+        rightServo.write(servo2_deg);
+
+        // 定时打印状态 (每 200ms 打印一次)
+        if (millis() - lastPrintTime > 200) {
+            if (imu.isConnected()) {
+                Serial.printf("Pos: (%.1f, %.1f) -> Servo: (%.1f, %.1f) deg | IMU Pitch: %.1f, Roll: %.1f\n", 
+                              x, y, servo1_deg, servo2_deg, imu.getPitch(), imu.getRoll());
+            } else {
+                Serial.printf("Pos: (%.1f, %.1f) -> Servo: (%.1f, %.1f) deg | IMU: Offline\n", 
+                              x, y, servo1_deg, servo2_deg);
+            }
+            lastPrintTime = millis();
+        }
+        return true;
+    } else {
+        Serial.printf("Warning: Target (%.1f, %.1f) is unreachable!\n", x, y);
+        return false;
+    }
+}
+
+// 处理串口输入指令
+void processSerialInput() {
+    if (Serial.available() > 0) {
+        String input = Serial.readStringUntil('\n');
+        input.trim();
+
+        if (input.equalsIgnoreCase("standby")) {
+            currentMode = MODE_STANDBY;
+            targetX = 0.0f;
+            targetY = -100.0f;
+            Serial.println("Switching to STANDBY mode.");
+        } else if (input.equalsIgnoreCase("circle")) {
+            currentMode = MODE_CIRCLE;
+            timeStep = 0.0f;
+            Serial.println("Switching to CIRCLE trajectory mode.");
+        } else if (input.equalsIgnoreCase("walk")) {
+            currentMode = MODE_WALK;
+            timeStep = 0.0f;
+            Serial.println("Switching to WALK gait mode.");
+        } else if (input.equalsIgnoreCase("balance")) {
+            if (imu.isConnected()) {
+                currentMode = MODE_BALANCE;
+                Serial.println("Switching to IMU BALANCE feedback mode.");
+            } else {
+                Serial.println("Error: Cannot enable balance mode because IMU is offline.");
+            }
+        } else {
+            // 尝试解析为 X Y 坐标
+            int spaceIndex = input.indexOf(' ');
+            if (spaceIndex != -1) {
+                float rawX = input.substring(0, spaceIndex).toFloat();
+                float rawY = input.substring(spaceIndex + 1).toFloat();
+                
+                // 如果 Y 没有带负号且大于0，提示用户可能漏写了负号
+                if (rawY > 0) {
+                    Serial.println("提示: 机器人在下方工作，Y坐标应为负数 (如 -100)。已自动将其转为负值。");
+                    rawY = -rawY;
+                }
+
+                currentMode = MODE_INTERACTIVE;
+                targetX = rawX;
+                targetY = rawY;
+                Serial.printf("Switching to INTERACTIVE mode. Target: (%.1f, %.1f)\n", targetX, targetY);
+            } else {
+                Serial.println("未知指令。请输入 'standby', 'circle', 'walk', 'balance' 或 'X Y'。");
+            }
+        }
+    }
+}
+
+// 根据当前模式计算轨迹位置并移动
+void executeTrajectory() {
+    switch (currentMode) {
+        case MODE_STANDBY:
+            moveToPosition(targetX, targetY);
+            break;
+
+        case MODE_CIRCLE: {
+            // 圆心在 (0, -100), 半径 15mm
+            float centerX = 0.0f;
+            float centerY = -100.0f;
+            float radius = 15.0f;
+            
+            timeStep += 0.04f; 
+            if (timeStep > 2.0f * PI_VAL) {
+                timeStep -= 2.0f * PI_VAL;
+            }
+
+            float x = centerX + radius * cos(timeStep);
+            float y = centerY + radius * sin(timeStep);
+            moveToPosition(x, y);
+            break;
+        }
+
+        case MODE_WALK: {
+            // 模拟单个并联腿的步行轨迹 (Stance/Swing 相位)
+            float stride = 30.0f;
+            float stepHeight = 15.0f;
+            float groundY = -110.0f;
+
+            timeStep += 0.01f;
+            if (timeStep > 1.0f) {
+                timeStep = 0.0f;
+            }
+
+            float x, y;
+            if (timeStep < 0.5f) {
+                float t = timeStep / 0.5f;
+                x = 15.0f - stride * t;
+                y = groundY;
+            } else {
+                float t = (timeStep - 0.5f) / 0.5f;
+                x = -15.0f + stride * t;
+                y = groundY + stepHeight * sin(t * PI_VAL);
+            }
+            moveToPosition(x, y);
+            break;
+        }
+
+        case MODE_BALANCE: {
+            // IMU 自适应平衡反馈：
+            // 当机身向前倾斜（pitch > 0）时，控制脚掌向前偏移以维持中心平衡；
+            // 比例系数为 -1.2mm / 度（即倾斜 10 度导致脚向相反方向移动 12mm 以提供阻尼支撑）。
+            float kp = -1.2f;
+            float compensatedX = imu.getPitch() * kp;
+            
+            // 默认悬停高度为 -100mm
+            float defaultY = -100.0f;
+            
+            moveToPosition(compensatedX, defaultY);
+            break;
+        }
+
+        case MODE_INTERACTIVE:
+            moveToPosition(targetX, targetY);
+            break;
+    }
+}
+
+// 更新板载 LED 呼吸灯 (使用 sine 曲线实现平滑呼吸效果)
+void updateBreathingLed() {
+    float breathingVal = sin(millis() * 0.003f); // 周期约 2.1s
+    int brightness = (int)(127.5f * (1.0f + breathingVal));
+    analogWrite(LED_PIN, brightness);
+}
