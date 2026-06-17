@@ -39,7 +39,7 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     Serial.println("\n==============================================");
-    Serial.println("ESP32-C3 Parallel Leg Robot Closed-Loop Init...");
+    Serial.println("ESP32-C3 Wheel-Leg CAN Controller Init...");
     Serial.println("==============================================");
 
     // 2. 初始化 IMU

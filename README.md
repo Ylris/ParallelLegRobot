@@ -1,6 +1,6 @@
-# ESP32-C3 并联腿机器人控制 + IMU 姿态自平衡案例
+# ESP32-C3 轮腿 CAN 主控 + IMU 姿态反馈
 
-这是一个基于 ESP32-C3 开发板与 PlatformIO 搭建的 **双自由度 (2-DOF) 并联腿机器人** 运动控制与 IMU 姿态自平衡案例。
+这是一个基于 ESP32-C3 与 PlatformIO 搭建的 **轮腿机器人主控板** 项目。主控通过 CAN 总线连接 YYT MiniOdrive 电机驱动器，并接入 MPU6050 IMU，用于轮腿/并联腿机构的运动控制与姿态反馈。
 
 并联腿（如经典的五杆闭链机构，Five-bar linkage）由于其电机（舵机）都可以安装在靠近身体的根部，具有极低的腿部惯量，非常适合制作高性能的双足或四足跑跳机器人。
 
@@ -129,7 +129,7 @@ YYT MiniOdrive 使用 STM32G431，工程目录 `YYT_MiniOdrive/` 中已经包含
 本项目的目录结构符合标准的 PlatformIO 规范：
 
 ```
-ParallelLegRobot/
+WheelLegCANController/
 ├── include/
 │   ├── LegConfig.h         # 物理参数、I2C引脚、零偏校准及工作空间限幅
 │   ├── LegKinematics.h     # 顺/逆运动学求解器类定义
