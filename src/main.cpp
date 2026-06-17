@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include "driver/uart.h" // 引入 ESP32 底层 UART 驱动
+#include "driver/twai.h" // 引入 ESP32-C3 TWAI (CAN) 驱动
 #include "LegConfig.h"
 #include "LegKinematics.h"
 #include "ImuManager.h"
@@ -21,9 +21,74 @@ MotionMode currentMode = MODE_STANDBY;
 float targetX = 0.0f;
 float targetY = -100.0f;
 
-
 // 打印当前状态的时间控制
 unsigned long lastPrintTime = 0;
+
+// PID 控制器结构体，用于在主控端对电机进行位置闭环控制
+struct PIDController {
+    float kp;
+    float ki;
+    float kd;
+    float error_sum;
+    float last_error;
+    float max_output;
+
+    void init(float p, float i, float d, float max_out) {
+        kp = p;
+        ki = i;
+        kd = d;
+        error_sum = 0.0f;
+        last_error = 0.0f;
+        max_output = max_out;
+    }
+
+    float update(float error, float dt, float current_velocity_rad_s, bool use_velocity_feedback) {
+        error_sum += error * dt;
+        
+        // 积分限幅 (防止积分饱和，限制积分项输出不超过最大输出的50%)
+        float max_i = max_output * 0.5f;
+        if (ki > 0.0f) {
+            if (error_sum * ki > max_i) error_sum = max_i / ki;
+            if (error_sum * ki < -max_i) error_sum = -max_i / ki;
+        }
+
+        float p_term = kp * error;
+        float i_term = ki * error_sum;
+        
+        float d_term;
+        if (use_velocity_feedback) {
+            // 使用电机反馈的真实速度，避免微分噪声
+            d_term = -kd * current_velocity_rad_s;
+        } else {
+            d_term = kd * (error - last_error) / dt;
+            last_error = error;
+        }
+
+        float output = p_term + i_term + d_term;
+        if (output > max_output) output = max_output;
+        if (output < -max_output) output = -max_output;
+        return output;
+    }
+};
+
+// 全局变量：电机 PID 控制器、目标角度、当前角度、当前速度、在线状态
+PIDController motorPids[MOTOR_COUNT];
+float targetAngles[MOTOR_COUNT] = {0.0f};
+float currentAngles[MOTOR_COUNT] = {0.0f};
+float currentVelocities[MOTOR_COUNT] = {0.0f};
+bool motorFeedbackReceived[MOTOR_COUNT] = {false};
+unsigned long lastFeedbackTime[MOTOR_COUNT] = {0};
+
+// 辅助映射函数：DriveID 到 motorIndex
+int getMotorIndex(int driveId) {
+    if (driveId == 1) return 0; // MOTOR_L1 (左腿电机 1)
+    if (driveId == 2) return 1; // MOTOR_L2 (左腿电机 2)
+    if (driveId == 3) return 2; // MOTOR_L3 (左腿辅助电机)
+    if (driveId == 5) return 3; // MOTOR_R1 (右腿电机 1)
+    if (driveId == 6) return 4; // MOTOR_R2 (右腿电机 2)
+    if (driveId == 7) return 5; // MOTOR_R3 (右腿辅助电机)
+    return -1;
+}
 
 // 函数声明
 void processSerialInput();
@@ -31,8 +96,9 @@ void executeTrajectory();
 bool moveToPosition(float x, float y);
 void updateBreathingLed();
 void setMotorPosition(int motorIndex, float rad);
-void setMotorMode(int motorIndex, int modeVal);
-
+void initTwai();
+void receiveCanMessages();
+void sendCanCommands();
 
 void setup() {
     // 1. 初始化调试串口
@@ -45,18 +111,15 @@ void setup() {
     // 2. 初始化 IMU
     imu.begin();
 
-    // 3. 初始化用于控制电机的 Hardware UART1
-    // 初始将 TX 映射到第一个电机引脚，RX 设为 -1 (仅发送)
-    Serial1.begin(MOTOR_BAUD, SERIAL_8N1, -1, MOTOR_PINS[0]);
-    Serial.println("Hardware UART1 configured for closed-loop motors.");
+    // 3. 初始化 TWAI (CAN) 驱动
+    initTwai();
 
-    // 4. 将所有 6 个电机初始化为位置闭环模式 (M0=0!)
-    Serial.println("Configuring all motors to Position Closed-loop Mode (M0=0)...");
+    // 4. 初始化所有电机的位置闭环 PID 控制器
+    // 输入误差以 rad 为单位，输出为 millivolts (mV)，最大幅值为 3000mV (3.0V)
     for (int i = 0; i < MOTOR_COUNT; i++) {
-        setMotorMode(i, 0);
-        delay(50); // 适当延时防拥堵
+        motorPids[i].init(6000.0f, 50.0f, 150.0f, 3000.0f);
     }
-    Serial.println("All motors configured.");
+    Serial.println("All motor PID controllers initialized.");
 
     // 5. 初始化板载 LED
     pinMode(LED_PIN, OUTPUT);
@@ -74,51 +137,145 @@ void setup() {
 }
 
 void loop() {
-    // 1. 更新 IMU 数据
+    // 1. 接收所有来自 CAN 总线的电机反馈帧
+    receiveCanMessages();
+
+    // 2. 更新 IMU 数据
     imu.update();
 
-    // 2. 处理串口输入
+    // 3. 处理串口输入
     processSerialInput();
 
-    // 3. 根据模式执行轨迹
+    // 4. 根据模式执行轨迹，计算足端逆运动学并更新 targetAngles
     executeTrajectory();
 
-    // 4. 发送 IMU 数据到 PioPulse (FireWater 协议：前 3 位为姿态角，后 3 位为平移量)
+    // 5. 运行 PID 控制器计算输出并通过 CAN 发送电压指令
+    sendCanCommands();
+
+    // 6. 发送 IMU 数据到 PioPulse (FireWater 协议)
     if (imu.isConnected()) {
         Serial.printf("imu:%.2f,%.2f,%.2f,0.0,0.0,0.0\n", 
                       imu.getPitch(), imu.getRoll(), imu.getYaw());
     }
 
-
-    // 5. 更新板载 LED 呼吸灯
+    // 7. 更新板载 LED 呼吸灯
     updateBreathingLed();
 
-    // 6. 延时控制更新频率 (约 50Hz, 20ms)
+    // 8. 延时控制更新频率 (约 50Hz, 20ms)
     delay(20);
 }
 
+// 初始化 TWAI (CAN) 驱动器，引脚为 TX=GPIO6, RX=GPIO7，波特率为 1 Mbps
+void initTwai() {
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_6, GPIO_NUM_7, TWAI_MODE_NORMAL);
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS(); // 1 Mbps
+    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-// 物理层切换引脚并向目标电机发送弧度指令
-void setMotorPosition(int motorIndex, float rad) {
-    if (motorIndex < 0 || motorIndex >= MOTOR_COUNT) return;
-
-    // 1. 动态切换 UART1 TX 信号到目标电机的 GPIO 引脚
-    uart_set_pin(UART_NUM_1, MOTOR_PINS[motorIndex], UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-
-    // 2. 发送 ASCII 闭环控制协议指令: P0=<rad>!
-    Serial1.printf("P0=%.4f!", rad);
-
-    // 3. 强制刷空串口发送缓存，等待电信号发送完毕后再切换引脚
-    Serial1.flush();
+    if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+        if (twai_start() == ESP_OK) {
+            Serial.println("TWAI (CAN) driver started successfully at 1 Mbps.");
+        } else {
+            Serial.println("Failed to start TWAI driver.");
+        }
+    } else {
+        Serial.println("Failed to install TWAI driver.");
+    }
 }
 
-// 物理层切换引脚并设定电机的控制模式
-void setMotorMode(int motorIndex, int modeVal) {
-    if (motorIndex < 0 || motorIndex >= MOTOR_COUNT) return;
+// 接收 CAN 总线的电机角度/速度反馈
+void receiveCanMessages() {
+    twai_message_t message;
+    // 循环读取接收缓冲区中所有的消息
+    while (twai_receive(&message, 0) == ESP_OK) {
+        if (!(message.rtr) && message.identifier >= 0x101 && message.identifier <= 0x108) {
+            int driveId = message.identifier - 0x100;
+            int idx = getMotorIndex(driveId);
+            if (idx != -1 && message.data_length_code == 8) {
+                // 解析反馈帧：
+                // bytes 0..3: int32_t angle_mrad (小端序)
+                // bytes 4..5: int16_t speed_rpm_x10 (小端序)
+                int32_t angle_mrad = (int32_t)(message.data[0] | 
+                                              (message.data[1] << 8) | 
+                                              (message.data[2] << 16) | 
+                                              (message.data[3] << 24));
+                int16_t speed_rpm_x10 = (int16_t)(message.data[4] | 
+                                                 (message.data[5] << 8));
+                
+                currentAngles[idx] = (float)angle_mrad / 1000.0f; // 转换为弧度
+                
+                // 将 speed_rpm_x10 转换为 rad/s
+                float speed_rpm = (float)speed_rpm_x10 / 10.0f;
+                currentVelocities[idx] = speed_rpm * 0.104719755f;
+                
+                motorFeedbackReceived[idx] = true;
+                lastFeedbackTime[idx] = millis();
+            }
+        }
+    }
+}
 
-    uart_set_pin(UART_NUM_1, MOTOR_PINS[motorIndex], UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    Serial1.printf("M0=%d!", modeVal);
-    Serial1.flush();
+// 计算 PID 输出，打包并发送 CAN 控制帧 (0x100 和 0x200)
+void sendCanCommands() {
+    static unsigned long lastSendTime = 0;
+    unsigned long now = millis();
+    float dt = (float)(now - lastSendTime) * 0.001f;
+    if (dt <= 0.0f) dt = 0.02f; // 避免除零
+    lastSendTime = now;
+
+    int16_t left_mv[4] = {0, 0, 0, 0};
+    int16_t right_mv[4] = {0, 0, 0, 0};
+
+    // 为每个电机运行位置 PID 控制
+    for (int i = 0; i < MOTOR_COUNT; i++) {
+        // 安全检查：如果从未收到反馈或者超时（500ms无响应），则输出 0 mV 保证安全
+        if (!motorFeedbackReceived[i] || (now - lastFeedbackTime[i] > 500)) {
+            if (i < 3) {
+                left_mv[i] = 0;
+            } else {
+                right_mv[i - 3] = 0;
+            }
+            continue;
+        }
+
+        float error = targetAngles[i] - currentAngles[i];
+        float output_mv = motorPids[i].update(error, dt, currentVelocities[i], true);
+
+        if (i < 3) {
+            left_mv[i] = (int16_t)output_mv;
+        } else {
+            right_mv[i - 3] = (int16_t)output_mv;
+        }
+    }
+
+    // 组装并发送左腿控制帧 (ID: 0x100)
+    twai_message_t left_msg;
+    left_msg.identifier = 0x100;
+    left_msg.extd = 0;
+    left_msg.rtr = 0;
+    left_msg.data_length_code = 8;
+    for (int i = 0; i < 4; i++) {
+        left_msg.data[i * 2] = (uint8_t)(left_mv[i] & 0xFF);
+        left_msg.data[i * 2 + 1] = (uint8_t)((left_mv[i] >> 8) & 0xFF);
+    }
+    twai_transmit(&left_msg, pdMS_TO_TICKS(5));
+
+    // 组装并发送右腿控制帧 (ID: 0x200)
+    twai_message_t right_msg;
+    right_msg.identifier = 0x200;
+    right_msg.extd = 0;
+    right_msg.rtr = 0;
+    right_msg.data_length_code = 8;
+    for (int i = 0; i < 4; i++) {
+        right_msg.data[i * 2] = (uint8_t)(right_mv[i] & 0xFF);
+        right_msg.data[i * 2 + 1] = (uint8_t)((right_mv[i] >> 8) & 0xFF);
+    }
+    twai_transmit(&right_msg, pdMS_TO_TICKS(5));
+}
+
+// 设定目标电机角度 (只是更新 targetAngles 数组，发送由 sendCanCommands 统一周期性进行)
+void setMotorPosition(int motorIndex, float rad) {
+    if (motorIndex < 0 || motorIndex >= MOTOR_COUNT) return;
+    targetAngles[motorIndex] = rad;
 }
 
 // 驱动双腿足端移动到目标坐标 (x, y) 
@@ -142,10 +299,11 @@ bool moveToPosition(float x, float y) {
         setMotorPosition(MOTOR_R1, right_t1);
         setMotorPosition(MOTOR_R2, right_t2);
 
-        // 定时打印状态
+        // 定时打印状态，包含设定角度与电机反馈角度，方便调试
         if (millis() - lastPrintTime > 200) {
-            Serial.printf("Target: (%.1f, %.1f) | Left Rad: (%.2f, %.2f) | Right Rad: (%.2f, %.2f)\n", 
-                          x, y, left_t1, left_t2, right_t1, right_t2);
+            Serial.printf("Target: (%.1f, %.1f) | L Target: (%.2f, %.2f) Act: (%.2f, %.2f) | R Target: (%.2f, %.2f) Act: (%.2f, %.2f)\n", 
+                          x, y, left_t1, left_t2, currentAngles[MOTOR_L1], currentAngles[MOTOR_L2],
+                          right_t1, right_t2, currentAngles[MOTOR_R1], currentAngles[MOTOR_R2]);
             lastPrintTime = millis();
         }
         return true;
@@ -196,7 +354,6 @@ void processSerialInput() {
     }
 }
 
-
 // 根据当前模式计算轨迹位置并移动
 void executeTrajectory() {
     switch (currentMode) {
@@ -218,8 +375,6 @@ void executeTrajectory() {
             break;
     }
 }
-
-
 
 // 更新板载 LED 呼吸灯 (使用 sine 曲线实现平滑呼吸效果)
 void updateBreathingLed() {

@@ -44,8 +44,8 @@ const float LIMIT_Y_MAX = -60.0f;
 // ==========================================
 // IMU MPU6050 I2C 引脚配置 (避开电机引脚，使用标准引脚并连接上拉电阻)
 // ==========================================
-const int IMU_SDA_PIN = 8;
-const int IMU_SCL_PIN = 9;
+const int IMU_SDA_PIN = 5;
+const int IMU_SCL_PIN = 4;
 
 #endif // LEG_CONFIG_H
 
