@@ -1,10 +1,10 @@
 .pio/
 .vscode/
 .mxproject
-YYT_MiniOdrive/build/
-YYT_MiniOdrive/firmware_ids/
-YYT_MiniOdrive/设计文件/
-YYT_MiniOdrive/MDK-ARM/turing_CBU6/
+YYT_DriveFirmware/build/
+YYT_DriveFirmware/firmware_ids/
+YYT_DriveFirmware/设计文件/
+YYT_DriveFirmware/MDK-ARM/turing_CBU6/
 *.bin
 *.elf
 *.hex

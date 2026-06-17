@@ -103,10 +103,10 @@ TJA1050T 在本方案中只负责物理层收发，CAN 协议解析由 ESP32-C3 
 
 ### 2.4 下位机配置
 
-YYT MiniOdrive 使用 STM32G431，工程目录 `YYT_MiniOdrive/` 中已经包含 FDCAN 相关代码：
+YYT MiniOdrive 使用 STM32G431，工程目录 `YYT_DriveFirmware/` 中已经包含 FDCAN 相关代码：
 
-* `YYT_MiniOdrive/Core/Src/fdcan.c`：FDCAN1 初始化，Classic CAN，当前位时序约 1 Mbps。
-* `YYT_MiniOdrive/Core/Src/can_bridge.c`：CAN 命令解析、电机电压控制和状态回传。
+* `YYT_DriveFirmware/Core/Src/fdcan.c`：FDCAN1 初始化，Classic CAN，当前位时序约 1 Mbps。
+* `YYT_DriveFirmware/Core/Src/can_bridge.c`：CAN 命令解析、电机电压控制和状态回传。
 
 每块电机驱动板需要设置唯一的 `DRIVE_ID`。当前协议按 ID 分组：
 
@@ -119,7 +119,7 @@ YYT MiniOdrive 使用 STM32G431，工程目录 `YYT_MiniOdrive/` 中已经包含
 
 ### 2.5 当前软件适配状态
 
-`YYT_MiniOdrive/` 下位机固件已经是 CAN 接收方案；根目录 `src/main.cpp` 目前仍是旧版 `UART1 + GPIO 矩阵切换` 控制方式。要真正跑通这张新原理图，ESP32-C3 主控固件还需要把 `setMotorPosition()` 从串口 ASCII 指令改成 TWAI/CAN 帧发送，并把 `include/LegConfig.h` 中的 IMU I2C 引脚同步为 `SDA=GPIO5`、`SCL=GPIO4`。
+`YYT_DriveFirmware/` 下位机固件已经是 CAN 接收方案；根目录 `src/main.cpp` 目前仍是旧版 `UART1 + GPIO 矩阵切换` 控制方式。要真正跑通这张新原理图，ESP32-C3 主控固件还需要把 `setMotorPosition()` 从串口 ASCII 指令改成 TWAI/CAN 帧发送，并把 `include/LegConfig.h` 中的 IMU I2C 引脚同步为 `SDA=GPIO5`、`SCL=GPIO4`。
 
 ---
 
@@ -191,7 +191,7 @@ pio run --target upload
 
 * **物理连接**：ESP32-C3 `GPIO6/GPIO7` 作为 TWAI `TX/RX`，经过 TJA1050T 转换为 CANH/CANL，再连接到所有 YYT MiniOdrive 驱动板。
 * **总线类型**：Classic CAN，非 CAN FD。
-* **建议波特率**：`1 Mbps`，需要与 `YYT_MiniOdrive/Core/Src/fdcan.c` 的 FDCAN 位时序保持一致。
+* **建议波特率**：`1 Mbps`，需要与 `YYT_DriveFirmware/Core/Src/fdcan.c` 的 FDCAN 位时序保持一致。
 * **命令帧**：主控周期性发送标准帧 `0x100` 和 `0x200`，每帧 8 字节，每两个字节对应一个电机的命令值。
 
 命令帧 payload 使用小端序 `int16_t`，单位为 mV：
