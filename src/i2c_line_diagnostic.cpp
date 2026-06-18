@@ -62,7 +62,7 @@ static void scanExpected() {
 
 void setup() {
   Serial.begin(115200);
-  delay(1200);
+  delay(8000);
   Serial.println();
   Serial.println("I2C line diagnostic, ESP32C3 GPIO4=SDA GPIO3=SCL");
   printLevels("idle with pullups");
