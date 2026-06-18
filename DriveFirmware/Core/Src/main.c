@@ -340,6 +340,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 	System_Init();
 #if YYT_SAFE_START
+	Motor_init();
 	PID_Pos_Set(50,27,0,6);
   PID_Cur_D_Set(7.5,30,0,6);
 	PID_Cur_Q_Set(7.5,40,0,12);

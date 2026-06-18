@@ -84,10 +84,10 @@ struct MotorState {
 };
 
 static constexpr MotorConfig kMotors[] = {
-    {1, "left_front_upper", 4.860f, -1, 1},
-    {2, "left_rear_lower", 5.553f, 1, -1},
-    {5, "right_front_upper", 0.161f, -1, 1},
-    {6, "right_rear_lower", 1.991f, 1, -1},
+    {1, "left_front_upper", 4.860f, -1, +1},
+    {2, "left_rear_lower", 5.553f, -1, +1},
+    {5, "right_front_upper", 0.161f, -1, +1},
+    {6, "right_rear_lower", 1.991f, +1, +1},
 };
 
 static MotorState motor_state[9];
@@ -95,7 +95,7 @@ static int16_t command_mv[9] = {};
 static int motor_sign[9] = {};
 static bool direction_tested[9] = {};
 static bool armed = true;
-static bool direction_confirmed = true;
+static bool direction_confirmed = false;
 static bool height_hold_enabled = false;
 static float desired_target[9] = {};
 static float ramped_target[9] = {};
