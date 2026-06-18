@@ -40,7 +40,7 @@ static constexpr uint32_t kCommandPeriodMs = 20;
 static constexpr uint32_t kSummaryPeriodMs = 1000;
 static constexpr uint32_t kImuStreamPeriodMs = 50;
 static constexpr uint32_t kOnlineTimeoutMs = 500;
-static constexpr uint32_t kWheelStatePeriodMs = 100;
+static constexpr uint32_t kWheelStatePeriodMs = 20; // 50 Hz update for wheel I2C/FOC angles
 static constexpr int16_t kWheelPwmLimit = 1000;
 static constexpr float kStandbyXmm = 0.0f;
 static constexpr float kStandbyYmm = -100.0f;
@@ -289,6 +289,11 @@ static bool sendWheelPwmToCoprocessor(int16_t left_pwm, int16_t right_pwm) {
   Wire.write(static_cast<uint8_t>((left_pwm >> 8) & 0xff));
   Wire.write(static_cast<uint8_t>(right_pwm & 0xff));
   Wire.write(static_cast<uint8_t>((right_pwm >> 8) & 0xff));
+  // Send Left and Right raw encoder angles to STM32F103 for FOC commutation
+  Wire.write(static_cast<uint8_t>(left_wheel_encoder_raw & 0xff));
+  Wire.write(static_cast<uint8_t>((left_wheel_encoder_raw >> 8) & 0xff));
+  Wire.write(static_cast<uint8_t>(right_wheel_encoder_raw & 0xff));
+  Wire.write(static_cast<uint8_t>((right_wheel_encoder_raw >> 8) & 0xff));
   const bool ok = Wire.endTransmission() == 0;
 
   wheel_coprocessor_online = ok;
