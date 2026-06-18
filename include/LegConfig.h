@@ -56,7 +56,8 @@ const int IMU_SDA_PIN = I2C_SDA_PIN;
 const int IMU_SCL_PIN = I2C_SCL_PIN;
 const uint8_t MPU6050_I2C_ADDR = 0x68;
 const uint8_t WHEEL_PWM_COPROCESSOR_I2C_ADDR = 0x12;
-const uint8_t WHEEL_ENCODER_I2C_ADDR = 0x36;
+const uint8_t LEFT_WHEEL_ENCODER_I2C_ADDR = 0x36;
+const uint8_t RIGHT_WHEEL_ENCODER_I2C_ADDR = 0x38;
 
 #endif // LEG_CONFIG_H
 

@@ -117,11 +117,14 @@ static LegKinematics kinematics;
 static ImuManager imu;
 static bool imu_stream_enabled = false;
 static bool wheel_armed = false;
-static bool wheel_encoder_online = false;
+static bool left_wheel_encoder_online = false;
+static bool right_wheel_encoder_online = false;
 static bool wheel_coprocessor_online = false;
 static bool wheel_stream_enabled = false;
-static uint16_t wheel_encoder_raw = 0;
-static float wheel_angle_rad = 0.0f;
+static uint16_t left_wheel_encoder_raw = 0;
+static uint16_t right_wheel_encoder_raw = 0;
+static float left_wheel_angle_rad = 0.0f;
+static float right_wheel_angle_rad = 0.0f;
 static int16_t wheel_left_pwm = 0;
 static int16_t wheel_right_pwm = 0;
 
@@ -236,14 +239,15 @@ static bool i2cDevicePresent(uint8_t addr) {
 }
 
 static void scanI2cBus() {
-  Serial.printf("I2C scan on SDA=GPIO%d SCL=GPIO%d:\n", I2C_SDA_PIN, I2C_SCL_PIN);
+  Serial.println("Scanning I2C bus...");
   int found = 0;
   for (uint8_t addr = 1; addr < 0x7f; ++addr) {
     if (i2cDevicePresent(addr)) {
       Serial.printf("  found 0x%02X", addr);
       if (addr == MPU6050_I2C_ADDR) Serial.print(" MPU6050");
       if (addr == WHEEL_PWM_COPROCESSOR_I2C_ADDR) Serial.print(" STM32F103-wheel-pwm");
-      if (addr == WHEEL_ENCODER_I2C_ADDR) Serial.print(" wheel-encoder");
+      if (addr == LEFT_WHEEL_ENCODER_I2C_ADDR) Serial.print(" left-wheel-encoder");
+      if (addr == RIGHT_WHEEL_ENCODER_I2C_ADDR) Serial.print(" right-wheel-encoder");
       Serial.println();
       found++;
     }
@@ -251,27 +255,22 @@ static void scanI2cBus() {
   Serial.printf("I2C scan done, %d device(s)\n", found);
 }
 
-static bool readWheelEncoder() {
-  // Default wheel encoder protocol is AS5600-compatible:
-  // register 0x0C = raw angle high bits, 0x0D = raw angle low bits.
-  Wire.beginTransmission(WHEEL_ENCODER_I2C_ADDR);
+static bool readAS5600Encoder(uint8_t addr, uint16_t &raw, float &angle) {
+  Wire.beginTransmission(addr);
   Wire.write(0x0C);
   if (Wire.endTransmission(false) != 0) {
-    wheel_encoder_online = false;
     return false;
   }
 
-  const uint8_t got = Wire.requestFrom(WHEEL_ENCODER_I2C_ADDR, static_cast<uint8_t>(2));
+  const uint8_t got = Wire.requestFrom(addr, static_cast<uint8_t>(2));
   if (got != 2 || Wire.available() < 2) {
-    wheel_encoder_online = false;
     return false;
   }
 
   const uint8_t high = Wire.read();
   const uint8_t low = Wire.read();
-  wheel_encoder_raw = static_cast<uint16_t>(((high & 0x0f) << 8) | low);
-  wheel_angle_rad = static_cast<float>(wheel_encoder_raw) * kTwoPi / 4096.0f;
-  wheel_encoder_online = true;
+  raw = static_cast<uint16_t>(((high & 0x0f) << 8) | low);
+  angle = static_cast<float>(raw) * kTwoPi / 4096.0f;
   return true;
 }
 
@@ -307,7 +306,8 @@ static void stopWheelPwm() {
 }
 
 static void updateWheelDevices() {
-  (void)readWheelEncoder();
+  left_wheel_encoder_online = readAS5600Encoder(LEFT_WHEEL_ENCODER_I2C_ADDR, left_wheel_encoder_raw, left_wheel_angle_rad);
+  right_wheel_encoder_online = readAS5600Encoder(RIGHT_WHEEL_ENCODER_I2C_ADDR, right_wheel_encoder_raw, right_wheel_angle_rad);
   wheel_coprocessor_online = i2cDevicePresent(WHEEL_PWM_COPROCESSOR_I2C_ADDR);
 
   if (!wheel_armed && (wheel_left_pwm != 0 || wheel_right_pwm != 0)) {
@@ -316,16 +316,19 @@ static void updateWheelDevices() {
 }
 
 static void printWheelStatus() {
-  Serial.printf("wheel: armed=%s f103=%s encoder=%s addr_f103=0x%02X addr_enc=0x%02X pwm_l=%d pwm_r=%d enc_raw=%u angle=%.4f rad\n",
+  Serial.printf("wheel: armed=%s f103=%s left_enc=%s(0x%02X) raw_l=%u angle_l=%.4f rad | right_enc=%s(0x%02X) raw_r=%u angle_r=%.4f rad | pwm_l=%d pwm_r=%d\n",
                 wheel_armed ? "yes" : "no",
                 wheel_coprocessor_online ? "online" : "offline",
-                wheel_encoder_online ? "online" : "offline",
-                WHEEL_PWM_COPROCESSOR_I2C_ADDR,
-                WHEEL_ENCODER_I2C_ADDR,
+                left_wheel_encoder_online ? "online" : "offline",
+                LEFT_WHEEL_ENCODER_I2C_ADDR,
+                left_wheel_encoder_raw,
+                left_wheel_angle_rad,
+                right_wheel_encoder_online ? "online" : "offline",
+                RIGHT_WHEEL_ENCODER_I2C_ADDR,
+                right_wheel_encoder_raw,
+                right_wheel_angle_rad,
                 wheel_left_pwm,
-                wheel_right_pwm,
-                wheel_encoder_raw,
-                wheel_angle_rad);
+                wheel_right_pwm);
 }
 
 static bool sendGroup(uint32_t can_id, int first_motor_id) {
@@ -638,13 +641,15 @@ static void printStatus() {
                 imu.getPitch(),
                 imu.getRoll(),
                 imu.getYaw());
-  Serial.printf("  wheel f103=%s encoder=%s wheel_armed=%s pwm_l=%d pwm_r=%d angle=%.4f rad\n",
+  Serial.printf("  wheel f103=%s left_enc=%s right_enc=%s wheel_armed=%s pwm_l=%d pwm_r=%d angle_l=%.4f rad angle_r=%.4f rad\n",
                 wheel_coprocessor_online ? "online" : "offline",
-                wheel_encoder_online ? "online" : "offline",
+                left_wheel_encoder_online ? "online" : "offline",
+                right_wheel_encoder_online ? "online" : "offline",
                 wheel_armed ? "yes" : "no",
                 wheel_left_pwm,
                 wheel_right_pwm,
-                wheel_angle_rad);
+                left_wheel_angle_rad,
+                right_wheel_angle_rad);
 }
 
 static void printImuStatus() {
@@ -1248,17 +1253,19 @@ void loop() {
 
   if (wheel_stream_enabled && now - last_wheel_stream_ms >= kImuStreamPeriodMs) {
     last_wheel_stream_ms = now;
-    Serial.printf("wheel:%.4f,%d,%d,%s,%s\n",
-                  wheel_angle_rad,
+    Serial.printf("wheel:%.4f,%.4f,%d,%d,%s,%s,%s\n",
+                  left_wheel_angle_rad,
+                  right_wheel_angle_rad,
                   wheel_left_pwm,
                   wheel_right_pwm,
                   wheel_coprocessor_online ? "f103_online" : "f103_offline",
-                  wheel_encoder_online ? "enc_online" : "enc_offline");
+                  left_wheel_encoder_online ? "L_online" : "L_offline",
+                  right_wheel_encoder_online ? "R_online" : "R_offline");
   }
 
   if (now - last_summary_ms >= kSummaryPeriodMs) {
     last_summary_ms = now;
-    Serial.printf("online: ID1=%s ID2=%s ID5=%s ID6=%s armed=%s hold=%s wheel_f103=%s wheel_enc=%s\n",
+    Serial.printf("online: ID1=%s ID2=%s ID5=%s ID6=%s armed=%s hold=%s wheel_f103=%s wheel_enc_L=%s wheel_enc_R=%s\n",
                   isMotorOnline(1) ? "yes" : "no",
                   isMotorOnline(2) ? "yes" : "no",
                   isMotorOnline(5) ? "yes" : "no",
@@ -1266,6 +1273,7 @@ void loop() {
                   armed ? "yes" : "no",
                   height_hold_enabled ? "on" : "off",
                   wheel_coprocessor_online ? "yes" : "no",
-                  wheel_encoder_online ? "yes" : "no");
+                  left_wheel_encoder_online ? "yes" : "no",
+                  right_wheel_encoder_online ? "yes" : "no");
   }
 }
