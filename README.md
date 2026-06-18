@@ -278,8 +278,9 @@ STM32F103C8T6 到 SimpleFOC 的当前固件引脚：
 | 设备 | I2C 地址 | 接线 | 作用 |
 | :--- | :--- | :--- | :--- |
 | MPU6050 | `0x68` | `SCL=GPIO3`, `SDA=GPIO4` | 机身姿态 |
-| STM32F103 轮 PWM 协处理器 | `0x12` | `SCL=GPIO3`, `SDA=GPIO4` | 接收左右轮 PWM 命令 |
-| 轮磁编码器 | `0x36` | `SCL=GPIO3`, `SDA=GPIO4` | 轮位置/轮速闭环反馈 |
+| STM32F103 轮 PWM 协处理器 | `0x12` | `SCL=GPIO3`, `SDA=GPIO4` | 接收左右轮 PWM 控制量（STM32 不做闭环，仅输出 PWM/DIR 驱动 SimpleFOC） |
+| 左轮磁编码器 | `0x36` | `SCL=GPIO3`, `SDA=GPIO4` | 左轮位置反馈（由 ESP32 直接读取） |
+| 右轮磁编码器 | `0x38` | `SCL=GPIO3`, `SDA=GPIO4` | 右轮位置反馈（由 ESP32 直接读取） |
 
 ### 2.6 当前软件适配状态
 
@@ -291,8 +292,8 @@ STM32F103C8T6 到 SimpleFOC 的当前固件引脚：
 * 侧视图/图面坐标：左上 `ID1`、左下 `ID2`、右上 `ID5`、右下 `ID6`；左腿轮电机 `ID3`，右腿轮电机 `ID4`。
 * 机械零点已写入 `config/leg_calibration.json`，主控中也固化了对应零点。
 * YYT 预编译固件在 `DriveFirmware/firmware_ids/`，文件名里带 `_6v` 的是历史命名；当前主控按 12V 标准电机测试，命令上限配置为 `+/-12000 mV`。
-* 主控支持串口命令 `status`、`can`、`imu`、`imustream on/off`、`arm`、`test`、`confirm_dirs`、`stand`、`height`、`holdoff`、`stop`、`disarm`。
-* 轮电机方案使用同一条 I2C 总线：ESP32-C3 `SCL=GPIO3`、`SDA=GPIO4`，连接 MPU6050、STM32F103 PWM 协处理器和轮磁编码器；细节见 `docs/wheel_motor_i2c_plan.md`。
+* 主控支持串口命令 `status`、`can`、`imu`、`imustream on/off`、`arm`、`test`、`confirm_dirs`、`stand`、`height`、`holdoff`、`stop`、`disarm`、`zero6`、`zero <id>`（驱动侧位置保持）、`zero`（主控位置保持）、`wheelarm`、`wheeldisarm`、`wheelpwm <l> <r>`、`wheelstream <on|off>`。
+* 轮电机方案使用同一条 I2C 总线：ESP32-C3 `SCL=GPIO3`、`SDA=GPIO4`，连接 MPU6050、STM32F103 PWM 协处理器和两个轮磁编码器（左轮 `0x36`，右轮 `0x38`）；细节见 `docs/wheel_motor_i2c_plan.md`。
 * 最近现场确认 `ID6` 能在 12V 测试下动作，方向以负命令朝机械零点方向为准；四电机零位闭环保持仍需继续现场验证。
 
 ---
