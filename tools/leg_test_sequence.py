@@ -77,7 +77,7 @@ def main() -> int:
     dq_by_id: dict[int, float] = {}
     try:
         with serial.Serial(port, args.baud, timeout=0.25) as ser:
-            ser.setDTR(False)
+            ser.setDTR(True)
             ser.setRTS(False)
             time.sleep(2.0)
 

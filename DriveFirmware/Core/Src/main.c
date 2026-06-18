@@ -352,8 +352,11 @@ int main(void)
 	IQ_set=0;
 	ID_set=0;
 	mode=-1;
-	uq_limit=6;
-	voltage_power_supply =24;
+	uq_limit=12;
+	voltage_power_supply =12;
+	zero_electric_angle=MOTOR_ZERO_ELECTRIC_ANGLE;
+	zero_electric_angle_norm=0;
+	HAL_GPIO_WritePin(GPIOA,GPIO_PIN_4,GPIO_PIN_SET);
 #else
 	Motor_init();
 	//4108 10 oomm parameter
@@ -366,7 +369,7 @@ int main(void)
 	pole_pairs = 11;
 	Velo_set=6.28;
 	mode=1;
-	voltage_power_supply =24;
+	voltage_power_supply =12;
 
 	//4108 3 oomm parameter
 //	PID_Pos_Set(50,27,0,6);
@@ -547,16 +550,6 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == USART1) {
 			dma_in_process=0;
-			if(count==0) 
-			{
-				count++;
-				HAL_GPIO_WritePin(GPIOA,GPIO_PIN_4,GPIO_PIN_SET);
-			}
-			else if(count==1)
-			{
-				count--;
-				HAL_GPIO_WritePin(GPIOA,GPIO_PIN_4,GPIO_PIN_RESET);
-			}
     }
 }
 

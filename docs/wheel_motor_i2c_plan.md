@@ -21,6 +21,15 @@ All I2C devices share SDA/SCL/GND. They must have different 7-bit addresses.
 
 The current firmware keeps all wheel outputs disabled at boot. Type `wheelarm` before sending PWM.
 
+Physical wheel motor numbering:
+
+| Wheel | Motor ID |
+| --- | ---: |
+| Left-leg wheel motor | 3 |
+| Right-leg wheel motor | 4 |
+
+In the current I2C/PWM bring-up path, commands are still sent as `left` and `right` PWM values; these correspond to motor ID3 and ID4 respectively.
+
 ## STM32F103 Wiring
 
 The F103 minimum board firmware in `src/f103_wheel_pwm.cpp` uses these pins:

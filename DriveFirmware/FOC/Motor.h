@@ -8,10 +8,15 @@
 #include "Data.h"
 #include "mt6816.h"
 
+#ifndef MOTOR_ZERO_ELECTRIC_ANGLE
+#define MOTOR_ZERO_ELECTRIC_ANGLE 3.585681f
+#endif
+
 //初始化
 void Motor_init();
 //开环速度控制
 float velocityOpenloop(float target_velocity);
+float velocityOpenloopVoltage(float target_velocity, float target_voltage);
 //闭环位置控制(单闭环无电流环)
 void PID_Pos_Set(float P, float I, float D, float limit);// PID_Pos_Set(0.10,0.01,0,6);
 void PID_Pos_Cur_Set(float P, float I, float D, float limit);

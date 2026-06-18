@@ -26,7 +26,7 @@ void Motor_init()
 	setPhaseVoltage(3, 0,_3PI_2);
 	HAL_Delay(300);
 	//zero_electric_angle=_electricalAngle();
-	zero_electric_angle=3.585681f;
+	zero_electric_angle=MOTOR_ZERO_ELECTRIC_ANGLE;
   setPhaseVoltage(0, 0,_3PI_2);
 
 }
@@ -35,6 +35,11 @@ void Motor_init()
 
 //开环速度控制
 float velocityOpenloop(float target_velocity)
+{
+	return velocityOpenloopVoltage(target_velocity, 6.0f);
+}
+
+float velocityOpenloopVoltage(float target_velocity, float target_voltage)
 {
 	unsigned long now_us;
 	float Ts,Uq;
@@ -50,7 +55,7 @@ float velocityOpenloop(float target_velocity)
 
   shaft_angle = _normalizeAngle(shaft_angle + target_velocity*Ts); 
 	
-    Uq = 3;
+    Uq = target_voltage;
 
   setPhaseVoltage(Uq,  0, shaft_angle*pole_pairs);
 	

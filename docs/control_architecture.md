@@ -20,7 +20,7 @@
 - 控制层：根据 IMU、轮速、腿长等状态计算关节和轮电机输出。
 - 安全层：`robotArmed` 默认关闭，上电不允许直接出力。
 
-当前项目没有轮电机，四个腿电机架空，所以只采用“电机层 + CAN 层 + 腿部几何 + 安全输出”的部分。不移植完整 LQR 平衡控制，因为没有轮电机时无法验证站立和平衡闭环。
+当前现场 bring-up 仍先以四个腿关节电机架空调通为主。轮电机硬件编号已经确定为左腿轮电机 ID3、右腿轮电机 ID4，但整车站立和平衡闭环还需要等轮电机、IMU、轮速和姿态状态都接入后再验证。
 
 ## 当前默认主程序
 
@@ -34,8 +34,9 @@
 
 - `YYT_CAN_RX_PIN=7`
 - `YYT_CAN_TX_PIN=6`
-- `YYT_SAFE_MV_LIMIT=250`
-- `YYT_HOLD_MV_LIMIT=180`
+- `YYT_SAFE_MV_LIMIT=12000`
+- `YYT_MIN_TEST_MV=6000`
+- `YYT_HOLD_MV_LIMIT=12000`
 - `ARDUINO_USB_CDC_ON_BOOT=1`
 
 CAN 线序：
@@ -46,12 +47,14 @@ CAN 线序：
 
 ## 电机 ID 和零点
 
-当前四个腿电机：
+当前电机 ID 以侧视图/图面坐标为准：
 
-- ID1：`left_front_upper`
-- ID2：`left_rear_lower`
-- ID5：`right_front_upper`
-- ID6：`right_rear_lower`
+- 图面左上腿关节：ID1
+- 图面左下腿关节：ID2
+- 图面右上腿关节：ID5
+- 图面右下腿关节：ID6
+- 左腿轮电机：ID3
+- 右腿轮电机：ID4
 
 零点来自：
 
@@ -62,7 +65,7 @@ CAN 线序：
 - ID1 zero = `4.860`
 - ID2 zero = `5.553`
 - ID5 zero = `0.161`
-- ID6 zero = `1.991`
+- ID6 zero = `1.991`, drive_sign = `-1`
 
 反馈角度处理逻辑：
 
@@ -93,15 +96,20 @@ YYT 驱动板反馈：
 
 每个电机一个 `int16 mV` 槽位，小端序。
 
+特殊哨兵值：
+
+- `+2345 mV` 或 `-2345 mV`：YYT 驱动板本地零点位置保持。当前用于 ID6，驱动固件把目标设为 `DRIVE_ZERO_RAD=1.991`，接近后进入 PI 位置保持。
+- `+4321 mV` 或 `-4321 mV`：YYT 驱动板本地低速开环旋转测试。
+
 ## 安全状态机
 
-上电默认：
+当前现场测试固件默认：
 
-- `armed = false`
+- `armed = true`
 - `height_hold_enabled = false`
 - 所有命令为 `0 mV`
 
-必须输入：
+如果后续恢复保守 bring-up 配置，应改回上电 `armed = false`，必须输入：
 
 ```text
 arm
@@ -119,7 +127,7 @@ test <id> <mv> <ms>
 
 - 只允许 ID1/2/5/6。
 - 持续时间限制为 20 到 300 ms。
-- 电压受 `YYT_SAFE_MV_LIMIT` 限制。
+- 非零点动命令低于 `YYT_MIN_TEST_MV` 时会提升到 6000 mV，最高受 `YYT_SAFE_MV_LIMIT=12000` 限制。
 - 点动结束自动清零输出。
 - 点动后打印 `q_before`、`q_after`、`dq`。
 
@@ -153,6 +161,19 @@ height 100
 - CAN 总线错误
 - TWAI 状态不是 `running`
 
+ID6 专用零点保持：
+
+```text
+zero6
+```
+
+限制：
+
+- 必须先在线看到 ID6。
+- 主控持续给 ID6 槽位发送 `2345 mV` 哨兵值。
+- 位置闭环在 ID6 驱动板本地执行，不要求其它腿电机在线。
+- `stop`、`holdoff` 或 `disarm` 会清零输出并退出保持。
+
 ## 当前已经实现的目标
 
 当前软件已经实现：
@@ -167,10 +188,10 @@ height 100
 - CAN 状态查询。
 - 点动日志、高度保持日志、日志分析脚本。
 
-当前已经通过只读串口验证：
+历史 bring-up 记录曾通过只读串口验证；当前硬件状态以实时 `status` 输出为准：
 
 - ID1/2/5/6 能在线。
-- 默认 `armed=no`。
+- 当前现场测试构建默认 `armed=yes`。
 - 默认 `hold=off`。
 - 默认命令 `0 mV`。
 
@@ -196,11 +217,11 @@ python3 tools/analyze_bringup_logs.py --leg-log logs/leg_test_时间.txt --heigh
 
 ## 后续扩展路径
 
-没有轮电机时，不做真正站立平衡。
+轮电机闭环未接入前，不做真正站立平衡。
 
 后续加回轮电机后，再按这个顺序扩展：
 
-- 加轮电机 CAN ID、零点和方向。
+- 接入轮电机 ID3/ID4 的零点、方向和速度反馈。
 - 接入 MPU6050 姿态。
 - 引入腿长、腿角、腿速状态。
 - 引入轮速和车体速度估计。

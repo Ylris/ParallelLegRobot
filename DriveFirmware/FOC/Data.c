@@ -4,7 +4,7 @@
 //电机相关
 float sensor_direction =1;//编码器方向
 float pole_pairs = 14;//电机极对数
-float voltage_power_supply =24;//供电电压
+float voltage_power_supply =12;//供电电压
 float Ualpha=0,Ubeta=0,Ua=0,Ub=0,Uc=0;
 float zero_electric_angle=0;
 float zero_electric_angle_norm=0;
@@ -53,7 +53,7 @@ float IQ_set=0;
 float ID_set=0;
 
 float mode=-1;
-float uq_limit=6;
+float uq_limit=12;
 float func_flag=0;
 float PID_output;
 

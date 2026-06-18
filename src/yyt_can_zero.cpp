@@ -238,7 +238,10 @@ void loop() {
   if (YYT_ZERO_TX_ENABLE && now - last_zero_send_ms >= kSendZeroPeriodMs) {
     last_zero_send_ms = now;
     sendZeroCommands();
-    digitalWrite(kLedPin, (now / 1000) & 1);
+    // Breathing LED using sine wave.
+    float breathingVal = sin(now * 0.002f);
+    int brightness = (int)(127.5f * (1.0f + breathingVal));
+    analogWrite(kLedPin, brightness);
   }
 
   if (now - last_print_ms >= kPrintPeriodMs) {

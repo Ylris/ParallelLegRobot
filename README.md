@@ -58,8 +58,8 @@
 
 | 功能 | ESP32-C3 引脚 | 原理图网络名 | 逻辑电平 | 连接对象 | 备注 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| I2C SCL | `GPIO4` | `I2C_SCL` | 3.3V | MPU6050 `SCL` | 原理图中通过 `R3=1k` 上拉到 3V3 |
-| I2C SDA | `GPIO5` | `I2C_SDA` | 3.3V | MPU6050 `SDA` | 原理图中通过 `R4=1k` 上拉到 3V3 |
+| I2C SCL | `GPIO3` | `I2C_SCL` | 3.3V | MPU6050/F103/轮编码器 `SCL` | 当前代码 `include/LegConfig.h` 使用 GPIO3 |
+| I2C SDA | `GPIO4` | `I2C_SDA` | 3.3V | MPU6050/F103/轮编码器 `SDA` | 当前代码 `include/LegConfig.h` 使用 GPIO4 |
 | CAN TX | `GPIO6` | `CAN_TX` | 3.3V | TJA1050T `TXD` | ESP32-C3 TWAI 发送脚 |
 | CAN RX | `GPIO7` | `CAN_RX` | 3.3V 输入 | TJA1050T `RXD` | 需要注意 TJA1050T 的 5V 输出电平 |
 | BOOT | `GPIO9` | `BOOT` | 3.3V | 下载按键到 GND | 进入下载模式使用 |
@@ -110,25 +110,195 @@ YYT MiniOdrive 使用 STM32G431，工程目录 `DriveFirmware/` 中已经包含 
 
 每块电机驱动板需要设置唯一的 `DRIVE_ID`。当前协议按 ID 分组：
 
-| 驱动器 ID | 所属分组 | 接收命令 ID |
+当前实物 ID 以侧视图/图面坐标为准：
+
+| 侧视图位置 | 电机 ID | 用途 |
 | :--- | :--- | :--- |
-| `1` - `4` | 左侧腿组 | `0x100` |
-| `5` - `8` | 右侧腿组 | `0x200` |
+| 左上 | `1` | 左侧上方腿关节电机 |
+| 左下 | `2` | 左侧下方腿关节电机 |
+| 右上 | `5` | 右侧上方腿关节电机 |
+| 右下 | `6` | 右侧下方腿关节电机 |
+| 左腿轮电机 | `3` | 左轮驱动电机 |
+| 右腿轮电机 | `4` | 右轮驱动电机 |
+
+| 驱动器 ID | 命令分组 | 接收命令 ID |
+| :--- | :--- | :--- |
+| `1` - `4` | 低 ID 分组 | `0x100` |
+| `5` - `8` | 高 ID 分组 | `0x200` |
 
 电机组装好后，需要根据 `闭环参数调试.docx` 校准 AS5600 或 MT6816 磁编码器，并确认零点参数已经保存到驱动板。
 
-### 2.5 当前软件适配状态
+### 2.5 每个执行器驱动器怎么连接、干什么
 
-`DriveFirmware/` 下位机固件已经是 CAN 接收方案；根目录 `src/main.cpp` 当前是现场 bring-up 用的安全 CAN 主控，默认使用 `CAN_TX=GPIO6`、`CAN_RX=GPIO7`，启动后默认 `disarmed` 且输出 0 mV。
+当前机器人把执行器分成两类：
+
+* **四个腿关节执行器**：YYT MiniOdrive 驱动板，走 CAN 总线，由 ESP32-C3 主控直接发送电压命令。
+* **两个轮电机执行器**：SimpleFOC 驱动板，当前方案由 STM32F103C8T6 最小系统板输出 PWM/方向信号，ESP32-C3 通过 I2C 给 F103 下发左右轮 PWM。
+
+#### 腿关节 YYT MiniOdrive 驱动器
+
+四块 YYT 都并联在同一条 CAN 总线上。每块板需要三类连接：动力电源、CAN 通信、调试烧录。
+
+| 驱动器 | 安装位置 | 系统作用 | CAN 命令位置 | CAN 反馈 ID | 固件文件 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `ID1` | 图面/侧视图左上腿关节 | 左腿上关节执行器，改变左腿主动臂角度 | 标准帧 `0x100`，payload 字节 `0..1` | `0x101` | `DriveFirmware/firmware_ids/turing_CBU6_id1.hex` |
+| `ID2` | 图面/侧视图左下腿关节 | 左腿下关节执行器，改变左腿另一主动臂角度 | 标准帧 `0x100`，payload 字节 `2..3` | `0x102` | `DriveFirmware/firmware_ids/turing_CBU6_id2.hex` |
+| `ID5` | 图面/侧视图右上腿关节 | 右腿上关节执行器，改变右腿主动臂角度 | 标准帧 `0x200`，payload 字节 `0..1` | `0x105` | `DriveFirmware/firmware_ids/turing_CBU6_id5.hex` |
+| `ID6` | 图面/侧视图右下腿关节 | 右腿下关节执行器，改变右腿另一主动臂角度 | 标准帧 `0x200`，payload 字节 `2..3` | `0x106` | `DriveFirmware/firmware_ids/turing_CBU6_id6.hex` |
+
+YYT 驱动器的 CAN 连接：
+
+| 自制 ESP32-C3 主控板外部接口 | YYT MiniOdrive `CN2` | 作用 |
+| :--- | :--- | :--- |
+| `CAN+` / `CANH` | `CN2 pin 2 CANH` | CAN 差分高线 |
+| `CAN-` / `CANL` | `CN2 pin 1 CANL` | CAN 差分低线 |
+| `GND` | YYT `GND` 或电源负极 | 共地，必须接 |
+
+四个 `ID1/ID2/ID5/ID6` 与 ESP32-C3 的通信关系：
+
+```text
+ESP32-C3 主控芯片
+  GPIO6 = CAN_TX  ---->  TJA1050T TXD
+  GPIO7 = CAN_RX  <----  TJA1050T RXD
+
+TJA1050T CAN 收发器
+  CANH/CAN+  <====================>  四块 YYT 的 CANH 并联
+  CANL/CAN-  <====================>  四块 YYT 的 CANL 并联
+  GND        <====================>  四块 YYT / 电源负极共地
+
+同一条 CAN 总线上挂着：
+  YYT ID1, YYT ID2, YYT ID5, YYT ID6
+```
+
+这里要分清楚三层信号：
+
+| 层级 | 信号名 | 在哪里 | 说明 |
+| :--- | :--- | :--- | :--- |
+| ESP32 逻辑层 | `CAN_TX=GPIO6`、`CAN_RX=GPIO7` | ESP32-C3 到 TJA1050T 之间 | 这是 3.3V 逻辑信号，不直接接 YYT |
+| CAN 物理层 | `CANH/CANL` 或 `CAN+/CAN-` | TJA1050T 到 YYT 总线之间 | 这是差分总线，四块 YYT 并联在同一对线上 |
+| 协议层 | 标准 CAN ID `0x100/0x200/0x101...` | CAN 数据帧里 | 用帧 ID 和 payload 字节区分具体电机 |
+
+ESP32-C3 主控发送给四个腿电机的命令帧：
+
+| CAN 标准帧 ID | payload 字节 | 对应驱动器 | 单位 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| `0x100` | `data[0..1]` | `ID1` | `int16_t` mV，小端 | 左上腿关节电压命令 |
+| `0x100` | `data[2..3]` | `ID2` | `int16_t` mV，小端 | 左下腿关节电压命令 |
+| `0x100` | `data[4..5]` | `ID3` | `int16_t` mV，小端 | 预留给左轮/低 ID 第 3 路；当前腿联调不用 |
+| `0x100` | `data[6..7]` | `ID4` | `int16_t` mV，小端 | 预留给右轮/低 ID 第 4 路；当前腿联调不用 |
+| `0x200` | `data[0..1]` | `ID5` | `int16_t` mV，小端 | 右上腿关节电压命令 |
+| `0x200` | `data[2..3]` | `ID6` | `int16_t` mV，小端 | 右下腿关节电压命令 |
+| `0x200` | `data[4..5]` | `ID7` | `int16_t` mV，小端 | 预留 |
+| `0x200` | `data[6..7]` | `ID8` | `int16_t` mV，小端 | 预留 |
+
+举例：如果主控要给 `ID1=+1000 mV`、`ID2=-500 mV`，就发送标准帧 `0x100`，8 字节 payload 大致是：
+
+```text
+data[0..1] = +1000 的 int16 小端
+data[2..3] = -500 的 int16 小端
+data[4..5] = 0
+data[6..7] = 0
+```
+
+每块 YYT 固件里都有自己的 `DRIVE_ID`。收到 CAN 帧后，YYT 会这样判断：
+
+| YYT 固件 ID | 会监听的命令帧 | 从 payload 取哪两个字节 |
+| :--- | :--- | :--- |
+| `DRIVE_ID=1` | `0x100` | `data[0..1]` |
+| `DRIVE_ID=2` | `0x100` | `data[2..3]` |
+| `DRIVE_ID=5` | `0x200` | `data[0..1]` |
+| `DRIVE_ID=6` | `0x200` | `data[2..3]` |
+
+也就是说，四个电机不是四根单独通信线，而是 **同一条 CAN 总线 + 不同 ID/不同 payload 位置**。ESP32 同时发两帧，四块 YYT 各自取属于自己的那一格命令。
+
+四块 YYT 回传给 ESP32-C3 的反馈帧：
+
+| 驱动器 | 反馈 CAN 标准帧 ID | payload | ESP32 用途 |
+| :--- | :--- | :--- | :--- |
+| `ID1` | `0x101` | `data[0..3]` 角度 mrad，`data[4..5]` 速度 `rpm x10` | 判断 ID1 online，计算左上关节角度 |
+| `ID2` | `0x102` | 同上 | 判断 ID2 online，计算左下关节角度 |
+| `ID5` | `0x105` | 同上 | 判断 ID5 online，计算右上关节角度 |
+| `ID6` | `0x106` | 同上 | 判断 ID6 online，计算右下关节角度 |
+
+ESP32-C3 主控的 `status` 命令里看到：
+
+```text
+online: ID1=yes ID2=yes ID5=yes ID6=yes
+```
+
+就说明 ESP32 已经在同一条 CAN 总线上收到了四块 YYT 的反馈帧。某个 ID 显示 `no/offline`，通常表示这块驱动器没供电、CANH/CANL/GND 接触问题、对应 ID 固件没烧对，或者动作时驱动器重启/掉线。
+
+YYT 动力电源连接：
+
+| 电源线 | 接到哪里 | 作用和注意 |
+| :--- | :--- | :--- |
+| 电源正极 | YYT 主电源正极 / 电机电源输入 | 给功率级和电机供电，不能从 ESP32 板取 |
+| 电源负极 | YYT 主电源负极 / GND | 必须与 ESP32 主控 GND 共地 |
+| 三相线 | YYT 三相输出到电机三相线 | 已焊好的三相线不需要在普通 CAN 联调时拔掉 |
+
+YYT 的 ST-Link/SWD 只用于烧录和调试，正常跑机器人时不接：
+
+| YYT `U66` | ST-Link | 作用 |
+| :--- | :--- | :--- |
+| `pin 1 GND` | `GND` | 调试器地 |
+| `pin 2 SWCLK` | `SWCLK/CLK` | SWD 时钟 |
+| `pin 3 SWDIO` | `SWDIO/DIO` | SWD 数据 |
+| `pin 4 VCC` | `3.3V/VTref` | 目标板参考电压 |
+| `pin 5/6` | 不接 | 空脚或固定脚 |
+
+YYT CAN 固件的行为：
+
+* ESP32 每个控制周期发送 `0x100` 和 `0x200` 两帧，把四个腿关节的电压命令发给驱动器。
+* YYT 收到属于自己 ID 的命令后进入电压控制模式，单位是 mV。
+* YYT 超过约 `100 ms` 没收到新 CAN 命令，会自动把输出清零并退出电压控制。
+* 每块 YYT 回传 `0x100 + ID`，包含当前磁编码器角度和速度，ESP32 用这些反馈判断 online、关节角度和保持误差。
+
+#### 轮电机 SimpleFOC 驱动器
+
+轮电机当前不是 YYT CAN 链路的一部分。轮电机执行链路是：
+
+```text
+ESP32-C3 主控
+  -> I2C 总线 GPIO3(SCL) / GPIO4(SDA)
+  -> STM32F103C8T6 轮电机 PWM 协处理器, I2C 地址 0x12
+  -> PWM/方向信号
+  -> 两块 SimpleFOC 轮电机驱动板
+  -> 左右轮电机
+```
+
+STM32F103C8T6 到 SimpleFOC 的当前固件引脚：
+
+| F103 引脚 | 接到 SimpleFOC | 作用 |
+| :--- | :--- | :--- |
+| `PA0` | 左轮 SimpleFOC PWM 输入 | 左轮速度/占空比命令 |
+| `PA2` | 左轮 SimpleFOC 方向输入 | 左轮方向 |
+| `PA1` | 右轮 SimpleFOC PWM 输入 | 右轮速度/占空比命令 |
+| `PA3` | 右轮 SimpleFOC 方向输入 | 右轮方向 |
+| `PB6` | ESP32 I2C `SCL` 总线 | F103 作为 I2C 从机 |
+| `PB7` | ESP32 I2C `SDA` 总线 | F103 作为 I2C 从机 |
+| `GND` | ESP32 GND / SimpleFOC GND | 必须共地 |
+
+轮磁编码器也挂在同一条 ESP32 I2C 总线上：
+
+| 设备 | I2C 地址 | 接线 | 作用 |
+| :--- | :--- | :--- | :--- |
+| MPU6050 | `0x68` | `SCL=GPIO3`, `SDA=GPIO4` | 机身姿态 |
+| STM32F103 轮 PWM 协处理器 | `0x12` | `SCL=GPIO3`, `SDA=GPIO4` | 接收左右轮 PWM 命令 |
+| 轮磁编码器 | `0x36` | `SCL=GPIO3`, `SDA=GPIO4` | 轮位置/轮速闭环反馈 |
+
+### 2.6 当前软件适配状态
+
+`DriveFirmware/` 下位机固件已经是 CAN 接收方案；根目录 `src/main.cpp` 当前是现场 12V 测试用 CAN 主控，默认使用 `CAN_TX=GPIO6`、`CAN_RX=GPIO7`。当前测试构建里 `armed=true`、`YYT_ALLOW_UNTESTED_DIRS=1`，但启动命令仍为 0 mV；恢复保守 bring-up 时应改回上电 `disarmed`。
 
 截至 2026-06-18 的现场状态：
 
 * 四个腿电机 ID 为 `1/2/5/6`，均能通过 CAN 在线反馈。
+* 侧视图/图面坐标：左上 `ID1`、左下 `ID2`、右上 `ID5`、右下 `ID6`；左腿轮电机 `ID3`，右腿轮电机 `ID4`。
 * 机械零点已写入 `config/leg_calibration.json`，主控中也固化了对应零点。
-* YYT 预编译 6V 固件在 `DriveFirmware/firmware_ids/`。
+* YYT 预编译固件在 `DriveFirmware/firmware_ids/`，文件名里带 `_6v` 的是历史命名；当前主控按 12V 标准电机测试，命令上限配置为 `+/-12000 mV`。
 * 主控支持串口命令 `status`、`can`、`imu`、`imustream on/off`、`arm`、`test`、`confirm_dirs`、`stand`、`height`、`holdoff`、`stop`、`disarm`。
 * 轮电机方案使用同一条 I2C 总线：ESP32-C3 `SCL=GPIO3`、`SDA=GPIO4`，连接 MPU6050、STM32F103 PWM 协处理器和轮磁编码器；细节见 `docs/wheel_motor_i2c_plan.md`。
-* 最后一次测试中 CAN 链路稳定，主控能发出 `+/-6000 mV`，但架空腿没有移动到目标；下一步优先排查电池电量、主电源限流/压降或机构卡滞。
+* 最近现场确认 `ID6` 能在 12V 测试下动作，方向以负命令朝机械零点方向为准；四电机零位闭环保持仍需继续现场验证。
 
 ---
 
@@ -212,7 +382,7 @@ pio run --target upload
 | `4..5` | 分组内第 3 个电机电压命令 |
 | `6..7` | 分组内第 4 个电机电压命令 |
 
-下位机 `can_bridge.c` 当前将命令限幅到 `+/-3.0V`，并在收到有效命令后进入 `mode=7`。超过 `100 ms` 没有收到新命令时，下位机会清零命令并退出该模式。
+主控当前按 12V 电机配置，测试/保持命令上限为 `+/-12000 mV`。下位机在收到有效命令后进入电压控制模式；超过 `100 ms` 没有收到新命令时，下位机会清零命令并退出该模式。
 
 驱动器反馈帧使用标准 ID `0x100 + DRIVE_ID`，8 字节小端序：
 

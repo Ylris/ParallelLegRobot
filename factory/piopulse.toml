@@ -1,0 +1,68 @@
+name = "ParallelLegRobot"
+bootloader_path = "bootloader.bin"
+bootloader_offset = "0x0000"
+partitions_path = "partitions.bin"
+partitions_offset = "0x8000"
+otadata_path = "boot_app0.bin"
+otadata_offset = "0xe000"
+app_path = "firmware.bin"
+app_offset = "0x10000"
+baud_rate = 115200
+chip_type = "ESP32-C3"
+flash_mode = "dio"
+flash_freq = "40m"
+flash_size = "4MB"
+nvs_offset = "0x9000"
+verify_method = "ReadBack+SHA256"
+blank_check = true
+erase_mode = "Sector"
+incremental_programming = false
+secure_boot = false
+flash_encryption = false
+lock_after_flash = false
+operator_role = "Operator"
+firmware_version = "dev"
+sn_prefix = "SN"
+lot_code = "LOT-DEV"
+mes_endpoint = ""
+label_template = "QR+SN+MAC"
+qa_test_script = "LED,BUTTON,WIFI"
+do_not_chg_bin = true
+flash_encryption_mode = "disabled"
+merged_offset = "0x0000"
+use_merged_flash = false
+
+[[images]]
+label = "bootloader"
+path = "bootloader.bin"
+offset = "0x0000"
+required = true
+encrypted = false
+
+[[images]]
+label = "partitions"
+path = "partitions.bin"
+offset = "0x8000"
+required = true
+encrypted = false
+
+[[images]]
+label = "boot_app0"
+path = "boot_app0.bin"
+offset = "0xe000"
+required = true
+encrypted = false
+
+[[images]]
+label = "firmware"
+path = "firmware.bin"
+offset = "0x10000"
+required = true
+encrypted = false
+
+[[images]]
+label = "factory_merged"
+path = "factory_merged.bin"
+offset = "0x0000"
+required = true
+encrypted = false

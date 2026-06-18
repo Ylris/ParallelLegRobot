@@ -14,11 +14,23 @@
 #endif
 
 #ifndef YYT_SAFE_MV_LIMIT
-#define YYT_SAFE_MV_LIMIT 250
+#define YYT_SAFE_MV_LIMIT 12000
 #endif
 
 #ifndef YYT_HOLD_MV_LIMIT
-#define YYT_HOLD_MV_LIMIT 180
+#define YYT_HOLD_MV_LIMIT 12000
+#endif
+
+#ifndef YYT_MIN_TEST_MV
+#define YYT_MIN_TEST_MV 0
+#endif
+
+#ifndef YYT_DISABLE_I2C
+#define YYT_DISABLE_I2C 0
+#endif
+
+#ifndef YYT_ALLOW_UNTESTED_DIRS
+#define YYT_ALLOW_UNTESTED_DIRS 0
 #endif
 
 static constexpr int kLedPin = 10;
@@ -35,13 +47,21 @@ static constexpr float kStandbyYmm = -100.0f;
 static constexpr float kHeightMinMm = 80.0f;
 static constexpr float kHeightMaxMm = 120.0f;
 static constexpr float kTargetRampRadPerSec = 0.18f;
-static constexpr float kJointSoftLimitRad = 2.80f;
-static constexpr float kHoldKpMvPerRad = 3200.0f;
-static constexpr float kHoldKdMvPerRadSec = 24.0f;
-static constexpr float kHoldStaticBoostMv = 2200.0f;
+static constexpr float kJointSoftLimitRad = 3.40f;
+static constexpr float kHoldKpMvPerRad = 12000.0f;
+static constexpr float kHoldKdMvPerRadSec = 300.0f;
+static constexpr float kHoldStaticBoostMv = 0.0f;
 static constexpr float kHoldStaticBoostThresholdRad = 0.08f;
-static constexpr float kHoldFullPushThresholdRad = 0.05f;
-static constexpr float kStandRelativeStepRad = 0.30f;
+static constexpr float kHoldFullPushThresholdRad = 9.9f;
+static constexpr float kStandRelativeStepRad = 0.10f;
+static constexpr float kFeedbackJumpRejectRad = 0.80f;
+static constexpr int16_t kZeroHoldMvLimit = YYT_HOLD_MV_LIMIT;
+static constexpr int16_t kOpenLoopSpinMv = 4321;
+static constexpr int16_t kDriveZeroHoldMv = 2345;
+static constexpr uint32_t kCanRecoveryCooldownMs = 500;
+static constexpr uint32_t kCanTxPauseMs = 500;
+static constexpr uint32_t kCanTxQueueHighWater = 8;
+static constexpr uint32_t kCanTxErrorRecoveryThreshold = 96;
 
 struct MotorConfig {
   int id;
@@ -54,7 +74,10 @@ struct MotorConfig {
 struct MotorState {
   int32_t raw_angle_mrad = 0;
   int16_t speed_rpm_x10 = 0;
+  uint16_t adc4_raw = 0;
   uint32_t last_ms = 0;
+  bool feedback_seen = false;
+  uint32_t rejected_jumps = 0;
   float angle_rad = 0.0f;
   float joint_rad = 0.0f;
   float speed_rad_s = 0.0f;
@@ -64,15 +87,15 @@ static constexpr MotorConfig kMotors[] = {
     {1, "left_front_upper", 4.860f, -1, 1},
     {2, "left_rear_lower", 5.553f, 1, -1},
     {5, "right_front_upper", 0.161f, -1, 1},
-    {6, "right_rear_lower", 1.991f, 1, 1},
+    {6, "right_rear_lower", 1.991f, 1, -1},
 };
 
 static MotorState motor_state[9];
 static int16_t command_mv[9] = {};
 static int motor_sign[9] = {};
 static bool direction_tested[9] = {};
-static bool armed = false;
-static bool direction_confirmed = false;
+static bool armed = true;
+static bool direction_confirmed = true;
 static bool height_hold_enabled = false;
 static float desired_target[9] = {};
 static float ramped_target[9] = {};
@@ -83,8 +106,12 @@ static uint32_t last_wheel_stream_ms = 0;
 static uint32_t last_wheel_state_ms = 0;
 static uint32_t last_hold_update_ms = 0;
 static uint32_t tx_fail_count = 0;
+static uint32_t can_recovery_count = 0;
+static uint32_t last_can_recovery_ms = 0;
+static uint32_t can_tx_pause_until_ms = 0;
 static uint32_t height_hold_start_tx_fail = 0;
 static uint32_t height_hold_start_bus_error = 0;
+static int16_t active_hold_mv_limit = YYT_HOLD_MV_LIMIT;
 static String serial_line;
 static LegKinematics kinematics;
 static ImuManager imu;
@@ -110,6 +137,17 @@ static int16_t clampMv(long mv, int limit = YYT_SAFE_MV_LIMIT) {
   return static_cast<int16_t>(mv);
 }
 
+static int16_t clampTestMv(long mv) {
+  const int16_t limited = clampMv(mv);
+  if (limited == 0) return 0;
+  if (abs(limited) == kDriveZeroHoldMv) return limited;
+  if (abs(limited) == kOpenLoopSpinMv) return limited;
+  if (abs(limited) < YYT_MIN_TEST_MV) {
+    return limited > 0 ? YYT_MIN_TEST_MV : -YYT_MIN_TEST_MV;
+  }
+  return limited;
+}
+
 static const MotorConfig *findMotor(int id) {
   for (const auto &motor : kMotors) {
     if (motor.id == id) return &motor;
@@ -128,6 +166,13 @@ static bool allLegMotorsOnline() {
   return true;
 }
 
+static bool anyLegMotorOnline() {
+  for (const auto &motor : kMotors) {
+    if (isMotorOnline(motor.id)) return true;
+  }
+  return false;
+}
+
 static bool allDirectionsTested() {
   for (const auto &motor : kMotors) {
     if (!direction_tested[motor.id]) return false;
@@ -137,6 +182,13 @@ static bool allDirectionsTested() {
 
 static void clearCommands() {
   for (int i = 0; i < 9; ++i) command_mv[i] = 0;
+}
+
+static bool hasActiveMotorCommand() {
+  for (const auto &motor : kMotors) {
+    if (command_mv[motor.id] != 0) return true;
+  }
+  return false;
 }
 
 static void stopHeightHold(const char *reason) {
@@ -224,6 +276,11 @@ static bool readWheelEncoder() {
 }
 
 static bool sendWheelPwmToCoprocessor(int16_t left_pwm, int16_t right_pwm) {
+  if (YYT_DISABLE_I2C) {
+    wheel_coprocessor_online = false;
+    return false;
+  }
+
   left_pwm = constrain(left_pwm, -kWheelPwmLimit, kWheelPwmLimit);
   right_pwm = constrain(right_pwm, -kWheelPwmLimit, kWheelPwmLimit);
 
@@ -291,27 +348,103 @@ static bool sendGroup(uint32_t can_id, int first_motor_id) {
   return true;
 }
 
+static void serviceCanRecovery() {
+  twai_status_info_t info = {};
+  if (twai_get_status_info(&info) != ESP_OK) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (info.state == TWAI_STATE_BUS_OFF) {
+    if (now - last_can_recovery_ms >= kCanRecoveryCooldownMs) {
+      if (height_hold_enabled) {
+        stopHeightHold("CAN bus off");
+      }
+      clearCommands();
+      if (twai_initiate_recovery() == ESP_OK) {
+        can_recovery_count++;
+        last_can_recovery_ms = now;
+        can_tx_pause_until_ms = now + kCanTxPauseMs;
+      }
+    }
+    return;
+  }
+
+  if (info.state == TWAI_STATE_RECOVERING) {
+    can_tx_pause_until_ms = now + kCanTxPauseMs;
+    return;
+  }
+
+  if (info.state == TWAI_STATE_STOPPED) {
+    if (now - last_can_recovery_ms >= kCanRecoveryCooldownMs &&
+        twai_start() == ESP_OK) {
+      can_recovery_count++;
+      last_can_recovery_ms = now;
+      can_tx_pause_until_ms = now + kCanTxPauseMs;
+    }
+    return;
+  }
+
+  if (info.state != TWAI_STATE_RUNNING) {
+    return;
+  }
+
+  const bool idle_offline_bus = !anyLegMotorOnline() && !hasActiveMotorCommand();
+  const bool tx_backed_up = info.msgs_to_tx >= kCanTxQueueHighWater ||
+                            info.tx_error_counter >= kCanTxErrorRecoveryThreshold;
+  if (idle_offline_bus && tx_backed_up) {
+    if (now - last_can_recovery_ms >= kCanRecoveryCooldownMs) {
+      (void)twai_clear_transmit_queue();
+      can_recovery_count++;
+      last_can_recovery_ms = now;
+    }
+    can_tx_pause_until_ms = now + kCanTxPauseMs;
+  }
+}
+
 static void sendMotorCommands() {
+  const uint32_t now = millis();
+  if (can_tx_pause_until_ms != 0 &&
+      static_cast<int32_t>(now - can_tx_pause_until_ms) < 0) {
+    return;
+  }
+
   sendGroup(0x100, 1);
   sendGroup(0x200, 5);
 }
 
 static void receiveFeedback() {
   twai_message_t msg = {};
-  while (twai_receive(&msg, 0) == ESP_OK) {
+  int frames_processed = 0;
+  while (frames_processed < 64 && twai_receive(&msg, 0) == ESP_OK) {
+    frames_processed++;
     if (msg.extd || msg.data_length_code < 6) continue;
     if (msg.identifier < 0x101 || msg.identifier > 0x108) continue;
 
     const int id = static_cast<int>(msg.identifier - 0x100);
     MotorState &state = motor_state[id];
-    state.raw_angle_mrad = getInt32LE(&msg.data[0]);
-    state.speed_rpm_x10 = getInt16LE(&msg.data[4]);
-    state.last_ms = millis();
-    state.angle_rad = state.raw_angle_mrad / 1000.0f;
-
     const MotorConfig *cfg = findMotor(id);
+    if (cfg == nullptr) continue;
+
+    const int32_t next_raw_angle_mrad = getInt32LE(&msg.data[0]);
+    const float next_angle_rad = next_raw_angle_mrad / 1000.0f;
+    const float next_joint_rad = normalizeRad(next_angle_rad - cfg->zero_rad) * motor_sign[id];
+
+    if (state.feedback_seen &&
+        fabsf(normalizeRad(next_joint_rad - state.joint_rad)) > kFeedbackJumpRejectRad) {
+      state.rejected_jumps++;
+      continue;
+    }
+
+    state.raw_angle_mrad = next_raw_angle_mrad;
+    state.speed_rpm_x10 = getInt16LE(&msg.data[4]);
+    state.adc4_raw = static_cast<uint16_t>(getInt16LE(&msg.data[6]));
+    state.last_ms = millis();
+    state.feedback_seen = true;
+    state.angle_rad = next_angle_rad;
+    state.joint_rad = next_joint_rad;
+
     if (cfg != nullptr) {
-      state.joint_rad = normalizeRad(state.angle_rad - cfg->zero_rad) * motor_sign[id];
       const float rpm = state.speed_rpm_x10 / 10.0f;
       state.speed_rad_s = rpm * kTwoPi / 60.0f * motor_sign[id];
     }
@@ -350,8 +483,14 @@ static void updateHeightHold() {
     stopHeightHold("directions not confirmed");
     return;
   }
-  if (!allLegMotorsOnline()) {
-    stopHeightHold("one or more motors offline");
+  bool any_online = false;
+  for (const auto &motor : kMotors) {
+    if (isMotorOnline(motor.id)) {
+      any_online = true;
+    }
+  }
+  if (!any_online) {
+    stopHeightHold("all motors offline");
     return;
   }
   if (tx_fail_count != height_hold_start_tx_fail) {
@@ -374,6 +513,10 @@ static void updateHeightHold() {
 
   for (const auto &motor : kMotors) {
     const int id = motor.id;
+    if (!isMotorOnline(id)) {
+      command_mv[id] = 0;
+      continue;
+    }
     if (fabsf(motor_state[id].joint_rad) > kJointSoftLimitRad) {
       stopHeightHold("joint soft limit exceeded");
       return;
@@ -391,11 +534,11 @@ static void updateHeightHold() {
     const float err = normalizeRad(ramped_target[id] - motor_state[id].joint_rad);
     float mv = kHoldKpMvPerRad * err - kHoldKdMvPerRadSec * motor_state[id].speed_rad_s;
     if (fabsf(err) > kHoldFullPushThresholdRad) {
-      mv = err > 0.0f ? YYT_HOLD_MV_LIMIT : -YYT_HOLD_MV_LIMIT;
+      mv = err > 0.0f ? active_hold_mv_limit : -active_hold_mv_limit;
     } else if (fabsf(err) > kHoldStaticBoostThresholdRad) {
       mv += err > 0.0f ? kHoldStaticBoostMv : -kHoldStaticBoostMv;
     }
-    command_mv[id] = clampMv(lroundf(mv * motor.drive_sign), YYT_HOLD_MV_LIMIT);
+    command_mv[id] = clampMv(lroundf(mv * motor.drive_sign), active_hold_mv_limit);
   }
 }
 
@@ -418,11 +561,13 @@ static void printHelp() {
   Serial.println("  arm                   allow CAN voltage output, still sends 0 mV first");
   Serial.println("  disarm                stop all output and leave safe mode");
   Serial.println("  stop                  set all commands to 0 mV");
-  Serial.println("  test <id> <mv> <ms>   pulse one motor, example: test 1 80 100");
-  Serial.println("  v <id> <mv>           manually set one motor voltage while armed");
+  Serial.println("  test <id> <mv> <ms>   pulse one motor, nonzero mv is limited to +/-6000..12000");
+  Serial.println("  v <id> <mv>           manual voltage; 2345=drive zero hold, +/-4321=open-loop spin");
   Serial.println("  sign <id> <1|-1>      set runtime joint direction, example: sign 2 -1");
   Serial.println("  invert <id>           flip one runtime joint direction");
   Serial.println("  confirm_dirs          unlock height hold after manual direction check");
+  Serial.println("  zero6                 ID6 drive-side zero-position hold; stop/disarm exits");
+  Serial.println("  zero                  slowly return all four joints to q=0 and hold");
   Serial.println("  height <mm>           slow hold, allowed range 80..120, example: height 100");
   Serial.println("  stand                 relative mirrored leg pose from current q, then hold");
   Serial.println("  holdoff               disable height hold, keep armed state");
@@ -437,9 +582,14 @@ static void printCanStatus() {
     return;
   }
 
-  Serial.printf("CAN state=%s tx_fail=%lu bus_error=%lu tx_err=%lu rx_err=%lu tx_queue=%lu rx_queue=%lu rx_missed=%lu rx_overrun=%lu arb_lost=%lu\n",
+  const uint32_t now = millis();
+  const bool tx_paused = can_tx_pause_until_ms != 0 &&
+                         static_cast<int32_t>(now - can_tx_pause_until_ms) < 0;
+  Serial.printf("CAN state=%s tx_fail=%lu recoveries=%lu tx_pause=%s bus_error=%lu tx_err=%lu rx_err=%lu tx_queue=%lu rx_queue=%lu rx_missed=%lu rx_overrun=%lu arb_lost=%lu\n",
                 twaiStateName(info.state),
                 static_cast<unsigned long>(tx_fail_count),
+                static_cast<unsigned long>(can_recovery_count),
+                tx_paused ? "yes" : "no",
                 static_cast<unsigned long>(info.bus_error_count),
                 static_cast<unsigned long>(info.tx_error_counter),
                 static_cast<unsigned long>(info.rx_error_counter),
@@ -451,11 +601,12 @@ static void printCanStatus() {
 }
 
 static void printStatus() {
-  Serial.printf("armed=%s dirs=%s hold=%s safe=+/-%d mV hold=+/-%d mV tx_fail=%lu CAN_RX=GPIO%d CAN_TX=GPIO%d\n",
+  Serial.printf("armed=%s dirs=%s hold=%s safe=+/-%d mV test_min=%d mV hold=+/-%d mV tx_fail=%lu CAN_RX=GPIO%d CAN_TX=GPIO%d\n",
                 armed ? "yes" : "no",
                 direction_confirmed ? "confirmed" : "no",
                 height_hold_enabled ? "on" : "off",
                 YYT_SAFE_MV_LIMIT,
+                YYT_MIN_TEST_MV,
                 YYT_HOLD_MV_LIMIT,
                 static_cast<unsigned long>(tx_fail_count),
                 YYT_CAN_RX_PIN,
@@ -466,7 +617,7 @@ static void printStatus() {
     const int id = motor.id;
     const bool online = isMotorOnline(id);
     const uint32_t age = motor_state[id].last_ms == 0 ? 999999UL : now - motor_state[id].last_ms;
-    Serial.printf("  ID%d %-18s %s sign=%+d tested=%s age=%lu ms raw=%.3f rad q=%+.3f rad spd=%+.2f rad/s target=%+.3f cmd=%+d mV\n",
+    Serial.printf("  ID%d %-18s %s sign=%+d tested=%s age=%lu ms raw=%.3f rad q=%+.3f rad spd=%+.2f rad/s adc4=%u target=%+.3f cmd=%+d mV\n",
                   id,
                   motor.name,
                   online ? "online " : "offline",
@@ -476,6 +627,7 @@ static void printStatus() {
                   motor_state[id].angle_rad,
                   motor_state[id].joint_rad,
                   motor_state[id].speed_rad_s,
+                  motor_state[id].adc4_raw,
                   ramped_target[id],
                   command_mv[id]);
   }
@@ -534,7 +686,7 @@ static void runPulseTest(int id, int mv, int duration_ms) {
     return;
   }
 
-  duration_ms = constrain(duration_ms, 20, 300);
+  duration_ms = constrain(duration_ms, 20, 500);
   height_hold_enabled = false;
   clearCommands();
 
@@ -542,7 +694,7 @@ static void runPulseTest(int id, int mv, int duration_ms) {
   const float before_q = motor_state[id].joint_rad;
   const bool was_online = isMotorOnline(id);
 
-  command_mv[id] = clampMv(mv);
+  command_mv[id] = clampTestMv(mv);
   Serial.printf("pulse ID%d at %+d mV for %d ms, then auto stop\n", id, command_mv[id], duration_ms);
 
   const uint32_t start = millis();
@@ -669,17 +821,93 @@ static void handleCommand(String line) {
     return;
   }
   if (line.equalsIgnoreCase("confirm_dirs")) {
-    if (!allDirectionsTested()) {
+    if (!YYT_ALLOW_UNTESTED_DIRS && !allDirectionsTested()) {
       Serial.println("refused: test ID1, ID2, ID5, and ID6 before confirm_dirs");
       printDirectionCheck();
       return;
     }
-    if (!allLegMotorsOnline()) {
-      Serial.println("refused: not all four leg motors are online");
+    bool any_online = false;
+    for (const auto &motor : kMotors) {
+      if (isMotorOnline(motor.id)) any_online = true;
+    }
+    if (!any_online) {
+      Serial.println("refused: no leg motors are online");
       return;
     }
     direction_confirmed = true;
-    Serial.println("direction check confirmed: height hold is now allowed");
+    if (YYT_ALLOW_UNTESTED_DIRS && !allDirectionsTested()) {
+      Serial.println("direction check bypassed by build flag: height hold is now allowed");
+    } else {
+      Serial.println("direction check confirmed: height hold is now allowed");
+    }
+    return;
+  }
+  if (line.equalsIgnoreCase("zero6")) {
+    if (!armed) {
+      Serial.println("refused: type arm first");
+      return;
+    }
+    if (!isMotorOnline(6)) {
+      Serial.println("refused: ID6 is offline");
+      return;
+    }
+    if (fabsf(motor_state[6].joint_rad) > kJointSoftLimitRad) {
+      Serial.println("refused: ID6 current joint is outside soft limit");
+      return;
+    }
+    twai_status_info_t can_status = {};
+    if (twai_get_status_info(&can_status) != ESP_OK || can_status.state != TWAI_STATE_RUNNING) {
+      Serial.println("refused: CAN controller is not running");
+      return;
+    }
+    height_hold_enabled = false;
+    clearCommands();
+    desired_target[6] = 0.0f;
+    ramped_target[6] = motor_state[6].joint_rad;
+    command_mv[6] = kDriveZeroHoldMv;
+    Serial.printf("ID6 drive-side zero hold enabled: command %+d mV sentinel, drive target raw %.3f rad, stop/disarm exits\n",
+                  command_mv[6],
+                  findMotor(6)->zero_rad);
+    return;
+  }
+  if (line.equalsIgnoreCase("zero")) {
+    if (!armed) {
+      Serial.println("refused: type arm first");
+      return;
+    }
+    if (!direction_confirmed) {
+      Serial.println("refused: run single-joint tests, then type confirm_dirs");
+      return;
+    }
+    bool any_online = false;
+    for (const auto &motor : kMotors) {
+      if (isMotorOnline(motor.id)) any_online = true;
+    }
+    if (!any_online) {
+      Serial.println("refused: no leg motors are online");
+      return;
+    }
+    for (const auto &motor : kMotors) {
+      if (!isMotorOnline(motor.id)) continue;
+      if (fabsf(motor_state[motor.id].joint_rad) > kJointSoftLimitRad) {
+        Serial.println("refused: current joint is outside soft limit");
+        return;
+      }
+      desired_target[motor.id] = 0.0f;
+      ramped_target[motor.id] = motor_state[motor.id].joint_rad;
+    }
+    twai_status_info_t can_status = {};
+    if (twai_get_status_info(&can_status) != ESP_OK || can_status.state != TWAI_STATE_RUNNING) {
+      Serial.println("refused: CAN controller is not running");
+      return;
+    }
+    active_hold_mv_limit = kZeroHoldMvLimit;
+    height_hold_start_tx_fail = tx_fail_count;
+    height_hold_start_bus_error = can_status.bus_error_count;
+    height_hold_enabled = true;
+    last_hold_update_ms = millis();
+    Serial.printf("zero hold enabled: ramping all online joints to q=0, limit +/- %d mV\n",
+                  active_hold_mv_limit);
     return;
   }
   if (line.equalsIgnoreCase("holdoff")) {
@@ -754,7 +982,7 @@ static void handleCommand(String line) {
       return;
     }
     height_hold_enabled = false;
-    command_mv[id] = clampMv(mv);
+    command_mv[id] = clampTestMv(mv);
     Serial.printf("ID%d command set to %+d mV\n", id, command_mv[id]);
     return;
   }
@@ -769,8 +997,12 @@ static void handleCommand(String line) {
       Serial.println("refused: run single-joint tests, then type confirm_dirs");
       return;
     }
-    if (!allLegMotorsOnline()) {
-      Serial.println("refused: not all four leg motors are online");
+    bool any_online = false;
+    for (const auto &motor : kMotors) {
+      if (isMotorOnline(motor.id)) any_online = true;
+    }
+    if (!any_online) {
+      Serial.println("refused: no leg motors are online");
       return;
     }
 
@@ -779,6 +1011,7 @@ static void handleCommand(String line) {
     desired_target[5] = motor_state[5].joint_rad + kStandRelativeStepRad;
     desired_target[6] = motor_state[6].joint_rad - kStandRelativeStepRad;
     for (const auto &motor : kMotors) {
+      if (!isMotorOnline(motor.id)) continue;
       if (fabsf(desired_target[motor.id]) > kJointSoftLimitRad) {
         Serial.println("refused: relative stand target would exceed joint soft limit");
         return;
@@ -791,6 +1024,7 @@ static void handleCommand(String line) {
       Serial.println("refused: CAN controller is not running");
       return;
     }
+    active_hold_mv_limit = YYT_HOLD_MV_LIMIT;
     height_hold_start_tx_fail = tx_fail_count;
     height_hold_start_bus_error = can_status.bus_error_count;
     height_hold_enabled = true;
@@ -808,15 +1042,37 @@ static void handleCommand(String line) {
       Serial.println("refused: run single-joint tests, then type confirm_dirs");
       return;
     }
-    if (!allLegMotorsOnline()) {
-      Serial.println("refused: not all four leg motors are online");
+    bool any_online = false;
+    for (const auto &motor : kMotors) {
+      if (isMotorOnline(motor.id)) any_online = true;
+    }
+    if (!any_online) {
+      Serial.println("refused: no leg motors are online");
       return;
     }
     if (!computeTargetsFromHeight(height_mm, desired_target)) {
-      Serial.println("refused: height is outside safe range or IK failed");
-      return;
+      Serial.println("height IK target unavailable; using relative airborne hold target");
+      desired_target[1] = motor_state[1].joint_rad - kStandRelativeStepRad;
+      desired_target[2] = motor_state[2].joint_rad + kStandRelativeStepRad;
+      desired_target[5] = motor_state[5].joint_rad + kStandRelativeStepRad;
+      desired_target[6] = motor_state[6].joint_rad - kStandRelativeStepRad;
+    }
+    if (YYT_ALLOW_UNTESTED_DIRS) {
+      desired_target[1] = motor_state[1].joint_rad - kStandRelativeStepRad;
+      desired_target[2] = motor_state[2].joint_rad + kStandRelativeStepRad;
+      desired_target[5] = motor_state[5].joint_rad + kStandRelativeStepRad;
+      desired_target[6] = motor_state[6].joint_rad - kStandRelativeStepRad;
+      Serial.println("height command mapped to relative airborne hold target");
     }
     for (const auto &motor : kMotors) {
+      if (!isMotorOnline(motor.id)) continue;
+      if (fabsf(desired_target[motor.id]) > kJointSoftLimitRad) {
+        Serial.println("refused: height/relative target would exceed joint soft limit");
+        return;
+      }
+    }
+    for (const auto &motor : kMotors) {
+      if (!isMotorOnline(motor.id)) continue;
       ramped_target[motor.id] = motor_state[motor.id].joint_rad;
     }
     twai_status_info_t can_status = {};
@@ -824,6 +1080,7 @@ static void handleCommand(String line) {
       Serial.println("refused: CAN controller is not running");
       return;
     }
+    active_hold_mv_limit = YYT_HOLD_MV_LIMIT;
     height_hold_start_tx_fail = tx_fail_count;
     height_hold_start_bus_error = can_status.bus_error_count;
     height_hold_enabled = true;
@@ -876,7 +1133,7 @@ void setup() {
                 I2C_SDA_PIN,
                 I2C_SCL_PIN,
                 static_cast<unsigned long>(I2C_BUS_HZ));
-  Serial.println("boot policy: disarmed, zero voltage output only");
+  Serial.println("boot policy: armed by default, waiting for all motors to activate zero hold");
 
   for (const auto &motor : kMotors) {
     motor_sign[motor.id] = motor.sign;
@@ -889,16 +1146,20 @@ void setup() {
     Serial.println("CAN start failed; check ESP32C3 pins and transceiver wiring");
   }
 
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  Wire.setClock(I2C_BUS_HZ);
-  Wire.setTimeOut(20);
-  Serial.println("I2C started. Type i2cscan to scan devices.");
+  if (YYT_DISABLE_I2C) {
+    Serial.println("I2C disabled by build flag; leg CAN bring-up only");
+  } else {
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+    Wire.setClock(I2C_BUS_HZ);
+    Wire.setTimeOut(20);
+    Serial.println("I2C started. Type i2cscan to scan devices.");
 
-  if (!imu.begin()) {
-    Serial.println("IMU init skipped/failed; motor CAN bring-up can still continue");
+    if (!imu.begin()) {
+      Serial.println("IMU init skipped/failed; motor CAN bring-up can still continue");
+    }
+    updateWheelDevices();
+    stopWheelPwm();
   }
-  updateWheelDevices();
-  stopWheelPwm();
 
   if (computeTargetsFromHeight(100.0f, desired_target)) {
     for (const auto &motor : kMotors) {
@@ -910,7 +1171,28 @@ void setup() {
 
 void loop() {
   receiveFeedback();
-  imu.update();
+
+  static bool auto_zero_triggered = false;
+  if (!auto_zero_triggered && allLegMotorsOnline()) {
+    auto_zero_triggered = true;
+    for (const auto &motor : kMotors) {
+      desired_target[motor.id] = 0.0f;
+      ramped_target[motor.id] = motor_state[motor.id].joint_rad;
+    }
+    active_hold_mv_limit = kZeroHoldMvLimit;
+    height_hold_start_tx_fail = tx_fail_count;
+    twai_status_info_t can_status = {};
+    if (twai_get_status_info(&can_status) == ESP_OK) {
+      height_hold_start_bus_error = can_status.bus_error_count;
+    }
+    height_hold_enabled = true;
+    last_hold_update_ms = millis();
+    Serial.println("Auto-trigger zero hold: all leg motors online, ramping to q=0");
+  }
+
+  if (!YYT_DISABLE_I2C) {
+    imu.update();
+  }
 
   while (Serial.available() > 0) {
     const char c = static_cast<char>(Serial.read());
@@ -925,17 +1207,22 @@ void loop() {
   const uint32_t now = millis();
   if (now - last_command_ms >= kCommandPeriodMs) {
     last_command_ms = now;
+    serviceCanRecovery();
     updateHeightHold();
     sendMotorCommands();
-    digitalWrite(kLedPin, armed ? ((now / 150) & 1) : ((now / 1000) & 1));
+    // Breathing LED using sine wave. Faster when armed.
+    float speed = armed ? 0.006f : 0.002f;
+    float breathingVal = sin(now * speed);
+    int brightness = (int)(127.5f * (1.0f + breathingVal));
+    analogWrite(kLedPin, brightness);
   }
 
-  if (now - last_wheel_state_ms >= kWheelStatePeriodMs) {
+  if (!YYT_DISABLE_I2C && now - last_wheel_state_ms >= kWheelStatePeriodMs) {
     last_wheel_state_ms = now;
     updateWheelDevices();
   }
 
-  if (imu_stream_enabled && imu.isConnected() && now - last_imu_stream_ms >= kImuStreamPeriodMs) {
+  if (!YYT_DISABLE_I2C && imu_stream_enabled && imu.isConnected() && now - last_imu_stream_ms >= kImuStreamPeriodMs) {
     last_imu_stream_ms = now;
     Serial.printf("imu:%.2f,%.2f,%.2f,0.0,0.0,0.0\n",
                   imu.getPitch(),

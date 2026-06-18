@@ -24,6 +24,7 @@ static constexpr uint32_t kCmdPeriodMs = 20;
 static constexpr uint32_t kPrintPeriodMs = 250;
 static constexpr int kFirstId = 1;
 static constexpr int kLastId = 8;
+static constexpr int kLegMotorIds[] = {1, 2, 5, 6};
 
 static int16_t command_mv[kLastId + 1] = {};
 static MotorFeedback feedback[kLastId + 1];
@@ -36,6 +37,13 @@ static int16_t clampMv(long mv) {
   if (mv > YYT_SAFE_MV_LIMIT) return YYT_SAFE_MV_LIMIT;
   if (mv < -YYT_SAFE_MV_LIMIT) return -YYT_SAFE_MV_LIMIT;
   return static_cast<int16_t>(mv);
+}
+
+static bool isLegMotorId(int id) {
+  for (int leg_id : kLegMotorIds) {
+    if (id == leg_id) return true;
+  }
+  return false;
 }
 
 static void clearCommands() {
@@ -106,8 +114,8 @@ static void printHelp() {
   Serial.println("  arm               enable periodic CAN output");
   Serial.println("  disarm            send zeros and ignore voltage commands");
   Serial.println("  stop              set all motor commands to 0 mV");
-  Serial.println("  v <id> <mv>       set one motor voltage, id 1..8, mv limited by safety");
-  Serial.println("  all <mv>          set all motor voltages, mv limited by safety");
+  Serial.println("  v <id> <mv>       set one leg motor voltage, id 1/2/5/6, mv limited by safety");
+  Serial.println("  all <mv>          set all leg motor voltages, mv limited by safety");
   Serial.println("  test <id> <mv>    200 ms pulse, then auto stop");
   Serial.println();
 }
@@ -118,7 +126,7 @@ static void printStatus() {
                 YYT_CAN_TX_PIN);
 
   const uint32_t now = millis();
-  for (int id : {1, 2, 5, 6}) {
+  for (int id : kLegMotorIds) {
     const bool online = feedback[id].last_ms != 0 && now - feedback[id].last_ms < 500;
     Serial.printf("  id%d cmd=%d mV angle=%.3f rad speed=%.1f rpm %s age=%lu ms\n",
                   id,
@@ -132,8 +140,8 @@ static void printStatus() {
 }
 
 static void runPulseTest(int id, int mv) {
-  if (id < kFirstId || id > kLastId) {
-    Serial.println("bad id, use 1..8");
+  if (!isLegMotorId(id)) {
+    Serial.println("bad id, use one of: 1 2 5 6");
     return;
   }
 
@@ -188,8 +196,8 @@ static void handleCommand(String line) {
   int id = 0;
   int mv = 0;
   if (sscanf(line.c_str(), "v %d %d", &id, &mv) == 2) {
-    if (id < kFirstId || id > kLastId) {
-      Serial.println("bad id, use 1..8");
+    if (!isLegMotorId(id)) {
+      Serial.println("bad id, use one of: 1 2 5 6");
       return;
     }
     command_mv[id] = clampMv(mv);
@@ -199,10 +207,10 @@ static void handleCommand(String line) {
 
   if (sscanf(line.c_str(), "all %d", &mv) == 1) {
     const int16_t safe_mv = clampMv(mv);
-    for (int motor_id = kFirstId; motor_id <= kLastId; ++motor_id) {
+    for (int motor_id : kLegMotorIds) {
       command_mv[motor_id] = safe_mv;
     }
-    Serial.printf("all motor commands set to %d mV\n", safe_mv);
+    Serial.printf("all leg motor commands set to %d mV\n", safe_mv);
     return;
   }
 
@@ -279,7 +287,11 @@ void loop() {
   if (now - last_cmd_ms >= kCmdPeriodMs) {
     last_cmd_ms = now;
     sendMotorCommands();
-    digitalWrite(kLedPin, armed ? ((now / 200) & 1) : ((now / 1000) & 1));
+    // Breathing LED using sine wave. Faster when armed.
+    float speed = armed ? 0.006f : 0.002f;
+    float breathingVal = sin(now * speed);
+    int brightness = (int)(127.5f * (1.0f + breathingVal));
+    analogWrite(kLedPin, brightness);
   }
 
   if (now - last_print_ms >= kPrintPeriodMs) {

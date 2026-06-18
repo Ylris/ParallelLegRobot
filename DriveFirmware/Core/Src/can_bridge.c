@@ -3,7 +3,9 @@
 #include "fdcan.h"
 #include "Data.h"
 #include "FOC.h"
+#include "Motor.h"
 #include "mt6816.h"
+#include <math.h>
 #include <string.h>
 
 #ifndef DRIVE_ID
@@ -15,13 +17,34 @@
 #define CAN_FEEDBACK_BASE_ID    0x100U
 #define CAN_COMMAND_TIMEOUT_US  100000U
 #define CAN_FEEDBACK_PERIOD_US  2000U
-#define CAN_MAX_COMMAND_VOLTAGE 6.0f
+#define CAN_RECOVERY_PERIOD_US  100000U
+#define CAN_MAX_COMMAND_VOLTAGE 12.0f
+#define CAN_SPIN_TEST_MV        4321
+#define CAN_ZERO_HOLD_MV        2345
+#define CAN_SPIN_TEST_VOLTAGE   6.0f
+#define CAN_SPIN_TEST_VELOCITY  0.12f
+#define CAN_ZERO_HOLD_KP        12.0f
+#define CAN_ZERO_HOLD_KI        3.0f
+#define CAN_ZERO_HOLD_LIMIT     12.0f
+#define CAN_ZERO_APPROACH_RAD   0.12f
+
+#ifndef DRIVE_ZERO_RAD
+#if DRIVE_ID == 6
+#define DRIVE_ZERO_RAD          1.991f
+#else
+#define DRIVE_ZERO_RAD          0.0f
+#endif
+#endif
 
 extern uint32_t Get_Timestamp_us(void);
 
 static float can_voltage_cmd = 0.0f;
+static float can_spin_velocity = 0.0f;
+static float can_zero_integral = 0.0f;
+static uint32_t can_zero_pid_us = 0;
 static uint32_t last_command_us = 0;
 static uint32_t last_feedback_us = 0;
+static uint32_t last_recovery_us = 0;
 static uint8_t can_enabled = 0;
 
 static int16_t read_i16_le(const uint8_t *data)
@@ -69,8 +92,27 @@ static void process_command(uint32_t std_id, const uint8_t *data)
     }
 
     mv = read_i16_le(&data[slot * 2U]);
-    can_voltage_cmd = clamp_float((float)mv * 0.001f, CAN_MAX_COMMAND_VOLTAGE);
     last_command_us = Get_Timestamp_us();
+    if (mv == CAN_SPIN_TEST_MV || mv == -CAN_SPIN_TEST_MV)
+    {
+        can_spin_velocity = mv > 0 ? CAN_SPIN_TEST_VELOCITY : -CAN_SPIN_TEST_VELOCITY;
+        mode = 8;
+        return;
+    }
+    if (mv == CAN_ZERO_HOLD_MV || mv == -CAN_ZERO_HOLD_MV)
+    {
+        uint8_t entering_zero_hold = (mode != 9);
+        if (entering_zero_hold)
+        {
+            can_zero_integral = 0.0f;
+            can_zero_pid_us = Get_Timestamp_us();
+        }
+        Pos_set = DRIVE_ZERO_RAD;
+        mode = 9;
+        return;
+    }
+
+    can_voltage_cmd = clamp_float((float)mv * 0.001f, CAN_MAX_COMMAND_VOLTAGE);
     mode = 7;
 }
 
@@ -105,10 +147,11 @@ static void send_feedback(void)
 #endif
     int32_t angle_mrad = (int32_t)(angle * 1000.0f);
     int16_t speed_rpm_x10 = (int16_t)(speed * 60.0f / (2.0f * PI) * 10.0f);
+    uint16_t adc4_raw = adc_value_in4 > 65535U ? 65535U : (uint16_t)adc_value_in4;
 
     write_i32_le(&tx_data[0], angle_mrad);
     write_i16_le(&tx_data[4], speed_rpm_x10);
-    write_i16_le(&tx_data[6], 0);
+    write_i16_le(&tx_data[6], (int16_t)adc4_raw);
 
     memset(&tx_header, 0, sizeof(tx_header));
     tx_header.Identifier = CAN_FEEDBACK_BASE_ID + DRIVE_ID;
@@ -121,7 +164,49 @@ static void send_feedback(void)
     tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
     tx_header.MessageMarker = 0;
 
+    if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0U)
+    {
+        return;
+    }
+
     (void)HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &tx_header, tx_data);
+}
+
+static void recover_can_if_needed(uint32_t now_us)
+{
+    FDCAN_ProtocolStatusTypeDef protocol_status;
+    uint8_t needs_recovery = 0;
+
+    if (HAL_FDCAN_GetProtocolStatus(&hfdcan1, &protocol_status) != HAL_OK)
+    {
+        needs_recovery = 1;
+    }
+    else if (protocol_status.BusOff != 0U)
+    {
+        needs_recovery = 1;
+    }
+    else if ((FDCAN1->CCCR & FDCAN_CCCR_INIT) != 0U)
+    {
+        needs_recovery = 1;
+    }
+
+    if (!needs_recovery ||
+        (uint32_t)(now_us - last_recovery_us) < CAN_RECOVERY_PERIOD_US)
+    {
+        return;
+    }
+
+    last_recovery_us = now_us;
+    can_zero_integral = 0.0f;
+    mode = -1;
+    setPhaseVoltage(0.0f, 0.0f, _electricalAngle());
+
+    (void)HAL_FDCAN_Stop(&hfdcan1);
+    if (HAL_FDCAN_Start(&hfdcan1) == HAL_OK)
+    {
+        last_command_us = now_us;
+        last_feedback_us = now_us;
+    }
 }
 
 void CAN_Bridge_Init(void)
@@ -156,6 +241,7 @@ void CAN_Bridge_Run(void)
 
     poll_rx();
     now_us = Get_Timestamp_us();
+    recover_can_if_needed(now_us);
 
     if (mode == 7)
     {
@@ -167,6 +253,57 @@ void CAN_Bridge_Run(void)
         else
         {
             setPhaseVoltage(can_voltage_cmd, 0.0f, _electricalAngle());
+        }
+    }
+    else if (mode == 8)
+    {
+        if ((uint32_t)(now_us - last_command_us) > CAN_COMMAND_TIMEOUT_US)
+        {
+            mode = -1;
+            setPhaseVoltage(0.0f, 0.0f, _electricalAngle());
+        }
+        else
+        {
+            velocityOpenloopVoltage(can_spin_velocity, CAN_SPIN_TEST_VOLTAGE);
+        }
+    }
+    else if (mode == 9)
+    {
+        if ((uint32_t)(now_us - last_command_us) > CAN_COMMAND_TIMEOUT_US)
+        {
+            can_zero_integral = 0.0f;
+            mode = -1;
+            setPhaseVoltage(0.0f, 0.0f, _electricalAngle());
+        }
+        else
+        {
+            float angle = sensor_direction * MT6816_Get_FullAngleData();
+            float error = angle - DRIVE_ZERO_RAD;
+            if (fabsf(error) > CAN_ZERO_APPROACH_RAD)
+            {
+                can_zero_integral = 0.0f;
+                can_zero_pid_us = now_us;
+                can_spin_velocity = error > 0.0f ? -CAN_SPIN_TEST_VELOCITY : CAN_SPIN_TEST_VELOCITY;
+                velocityOpenloopVoltage(can_spin_velocity, CAN_SPIN_TEST_VOLTAGE);
+            }
+            else
+            {
+                float pid_error;
+                float output;
+                float Ts = (float)((uint32_t)(now_us - can_zero_pid_us)) * 1e-6f;
+                if (Ts <= 0.0f || Ts > 0.5f)
+                {
+                    Ts = 1e-3f;
+                }
+                can_zero_pid_us = now_us;
+
+                pid_error = DRIVE_ZERO_RAD - angle;
+                can_zero_integral += CAN_ZERO_HOLD_KI * pid_error * Ts;
+                can_zero_integral = clamp_float(can_zero_integral, CAN_ZERO_HOLD_LIMIT);
+                output = CAN_ZERO_HOLD_KP * pid_error + can_zero_integral;
+                output = clamp_float(output, CAN_ZERO_HOLD_LIMIT);
+                setPhaseVoltage(output, 0.0f, _electricalAngle());
+            }
         }
     }
 

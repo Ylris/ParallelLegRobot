@@ -2,14 +2,33 @@
 
 This repository is the source of truth for the robot firmware and motor driver firmware.
 
+## Motor ID map
+
+Physical positions are recorded in the side-view drawing coordinates used during bring-up:
+
+| Side-view position | Drive ID | Role |
+| --- | ---: | --- |
+| upper-left | 1 | leg joint motor |
+| lower-left | 2 | leg joint motor |
+| upper-right | 5 | leg joint motor |
+| lower-right | 6 | leg joint motor |
+| left-leg wheel | 3 | wheel motor |
+| right-leg wheel | 4 | wheel motor |
+
 ## Flashed leg drive IDs
 
 | Joint | Drive ID | Firmware |
 | --- | ---: | --- |
-| Left front / upper | 1 | `DriveFirmware/firmware_ids/turing_CBU6_id1_6v.elf` |
-| Left rear / lower | 2 | `DriveFirmware/firmware_ids/turing_CBU6_id2_6v.elf` |
-| Right front / upper | 5 | `DriveFirmware/firmware_ids/turing_CBU6_id5_6v.elf` |
-| Right rear / lower | 6 | `DriveFirmware/firmware_ids/turing_CBU6_id6_6v.elf` |
+| Side-view upper-left | 1 | `DriveFirmware/firmware_ids/turing_CBU6_id1_6v.elf` |
+| Side-view lower-left | 2 | `DriveFirmware/firmware_ids/turing_CBU6_id2_6v.elf` |
+| Side-view upper-right | 5 | `DriveFirmware/firmware_ids/turing_CBU6_id5_6v.elf` |
+| Side-view lower-right | 6 | `DriveFirmware/firmware_ids/turing_CBU6_id6_6v.elf` |
+
+## Verified drive direction
+
+| Drive ID | Joint | Verified command direction | Main-controller `drive_sign` |
+| ---: | --- | --- | ---: |
+| 6 | Side-view lower-right | negative command, tested after reflashing board as ID6 | -1 |
 
 ## Build all ID firmwares
 
@@ -32,6 +51,14 @@ tools/flash_yyt_id.sh 6
 The FOC electrical zero belongs to the motor driver. The robot leg mechanical zero belongs to the main controller.
 
 Do not guess mechanical zero offsets. Put the robot in the standby pose, read each motor angle, then write those measured offsets into `config/leg_calibration.json`.
+
+For the current ID6 bring-up, the YYT drive firmware also recognizes a temporary command sentinel:
+
+```text
+zero6
+```
+
+The ESP32-C3 main controller sends `2345 mV` in the ID6 command slot. The ID6 YYT firmware treats that sentinel as a local zero-position hold request, moves toward `DRIVE_ZERO_RAD=1.991`, then holds with its local PI position loop. Use `stop`, `holdoff`, or `disarm` to exit.
 
 Recommended standby pose:
 
@@ -132,13 +159,12 @@ online: ID1=yes ID2=yes ID5=yes ID6=yes
 If the serial output looks like this:
 
 ```text
-CAN RX GPIO7, CAN TX GPIO6, baud 1Mbps
-twai: state=2 tx_error=128 rx_error=0 msgs_to_rx=0 bus_error=...
-diag: tx_ok=... tx_fail=... rx_total=0 rx_yyt=0
+CAN RX GPIO7, CAN TX GPIO6, 1 Mbps
+CAN state=running tx_fail=0 recoveries=10 tx_pause=yes bus_error=33505 tx_err=128 rx_err=0 tx_queue=1 rx_queue=0 ...
 online: ID1=no ID2=no ID5=no ID6=no
 ```
 
-the ESP32C3 firmware is running with the correct pins, but no powered CAN node is acknowledging frames. Check hardware before changing protocol code:
+the ESP32C3 firmware is running with the correct pins and is protecting itself by clearing the transmit queue, but no powered CAN node is acknowledging frames. Check hardware before changing protocol code:
 
 1. Connect only one YYT MiniOdrive first, preferably the ID1 board.
 2. Keep main-board USB connected to the computer.
@@ -148,3 +174,9 @@ the ESP32C3 firmware is running with the correct pins, but no powered CAN node i
 6. Connect main-board connector pin 2 `CAN+` to YYT `CN2 pin 2 CANH`.
 7. If still offline, swap only CANH and CANL once and query `status` again.
 8. If still offline, reflash that YYT board with its intended ID firmware and try again.
+
+After changing wiring or power, query with a delayed CAN status so the controller has time to attempt real bus traffic:
+
+```sh
+python3 -B tools/read_status_safe.py --command can --pre-command-delay 6 --read 3
+```

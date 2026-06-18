@@ -1,22 +1,24 @@
 # ESP32C3 主控安全联调流程
 
-本文档对应默认固件 `src/main.cpp`，目标是在没有轮电机、四个腿电机架空时，先完成腿部 CAN 控制链路。
+本文档对应默认固件 `src/main.cpp`，目标是在轮电机闭环尚未接入、四个腿电机架空时，先完成腿部 CAN 控制链路。
 
 ## 当前硬件连接
 
 - 自制主控板 CAN+ 接 YYT 驱动 CANH。
 - 自制主控板 CAN- 接 YYT 驱动 CANL。
 - 自制主控板 ESP32C3 逻辑侧 CAN_RX 为 GPIO7，CAN_TX 为 GPIO6。
-- YYT 腿电机 ID：
-  - ID1 `left_front_upper`
-  - ID2 `left_rear_lower`
-  - ID5 `right_front_upper`
-  - ID6 `right_rear_lower`
+- YYT 电机 ID 按侧视图/图面坐标记录：
+  - 图面左上腿关节：ID1
+  - 图面左下腿关节：ID2
+  - 图面右上腿关节：ID5
+  - 图面右下腿关节：ID6
+  - 左腿轮电机：ID3
+  - 右腿轮电机：ID4
 
 ## 固件安全策略
 
-- 上电默认 `disarmed`，只发送 0 mV。
-- `arm` 后才允许输出电压。
+- 当前现场测试构建上电 `armed=true`，但默认命令仍为 0 mV。
+- 恢复保守 bring-up 配置时，应改回上电 `disarmed`，再通过 `arm` 允许输出电压。
 - `test` 只允许 ID1/2/5/6，持续时间限制为 20 到 300 ms。
 - `height` 高度保持必须先完成 ID1/2/5/6 四个关节的 `test` 点动，再输入 `confirm_dirs`。
 - 如果某个关节方向反了，可以先用 `invert <id>` 临时翻转，或者用 `sign <id> <1|-1>` 指定方向；修改方向后需要重新点动确认。
@@ -45,7 +47,7 @@ pio device monitor -p /dev/cu.usbmodem1301 -b 115200
 正常启动后会周期性看到：
 
 ```text
-online: ID1=yes ID2=yes ID5=yes ID6=yes armed=no hold=off
+online: ID1=yes ID2=yes ID5=yes ID6=yes armed=yes hold=off
 ```
 
 输入：
@@ -71,7 +73,7 @@ dirs
 先确保：
 
 - 四个腿电机架空。
-- 手能马上关学生电源。
+- 手能马上关闭实验电源。
 - 限流先保守。
 - 串口状态四个 ID 都在线。
 
@@ -170,9 +172,9 @@ disarm
 ## 当前阶段验收标准
 
 - 上电能稳定读到 ID1/2/5/6。
-- 默认不动作，`armed=no`。
+- 默认命令为 0 mV，不主动运动。
 - `arm` 后可以安全点动单个关节。
 - 确认方向后，两条腿能在架空状态下缓慢移动到指定高度并保持。
 - 不出现 CAN 掉线、电流异常、撞限位或明显抖动。
 
-完成以上内容，说明没有轮电机时腿部控制链路已经基本打通；真正站立和平衡需要等轮电机、IMU、轮速和整车姿态闭环加入后再做。
+完成以上内容，说明腿部控制链路已经基本打通；真正站立和平衡需要等轮电机、IMU、轮速和整车姿态闭环加入后再做。
