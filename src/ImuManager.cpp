@@ -1,7 +1,7 @@
 #include "ImuManager.h"
 #include "LegConfig.h"
 
-#define MPU6050_ADDR 0x68
+#define MPU6050_ADDR MPU6050_I2C_ADDR
 #define PWR_MGMT_1   0x6B
 #define GYRO_CONFIG  0x1B
 #define ACCEL_CONFIG 0x1C
@@ -15,7 +15,7 @@ bool ImuManager::begin() {
     Serial.println("Initializing I2C Wire for IMU...");
     // 初始化 I2C，使用在 LegConfig.h 中配置的引脚
     Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN);
-    Wire.setClock(400000); // 400kHz I2C 速率
+    Wire.setClock(I2C_BUS_HZ);
 
     // 检查 MPU6050 是否在线
     Wire.beginTransmission(MPU6050_ADDR);

@@ -127,6 +127,7 @@ YYT MiniOdrive 使用 STM32G431，工程目录 `DriveFirmware/` 中已经包含 
 * 机械零点已写入 `config/leg_calibration.json`，主控中也固化了对应零点。
 * YYT 预编译 6V 固件在 `DriveFirmware/firmware_ids/`。
 * 主控支持串口命令 `status`、`can`、`imu`、`imustream on/off`、`arm`、`test`、`confirm_dirs`、`stand`、`height`、`holdoff`、`stop`、`disarm`。
+* 轮电机方案使用同一条 I2C 总线：ESP32-C3 `SCL=GPIO3`、`SDA=GPIO4`，连接 MPU6050、STM32F103 PWM 协处理器和轮磁编码器；细节见 `docs/wheel_motor_i2c_plan.md`。
 * 最后一次测试中 CAN 链路稳定，主控能发出 `+/-6000 mV`，但架空腿没有移动到目标；下一步优先排查电池电量、主电源限流/压降或机构卡滞。
 
 ---

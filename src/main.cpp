@@ -1,5 +1,7 @@
 #include <Arduino.h>
+#include <Wire.h>
 #include "driver/twai.h"
+#include "LegConfig.h"
 #include "LegKinematics.h"
 #include "ImuManager.h"
 
@@ -26,6 +28,8 @@ static constexpr uint32_t kCommandPeriodMs = 20;
 static constexpr uint32_t kSummaryPeriodMs = 1000;
 static constexpr uint32_t kImuStreamPeriodMs = 50;
 static constexpr uint32_t kOnlineTimeoutMs = 500;
+static constexpr uint32_t kWheelStatePeriodMs = 100;
+static constexpr int16_t kWheelPwmLimit = 1000;
 static constexpr float kStandbyXmm = 0.0f;
 static constexpr float kStandbyYmm = -100.0f;
 static constexpr float kHeightMinMm = 80.0f;
@@ -75,6 +79,8 @@ static float ramped_target[9] = {};
 static uint32_t last_command_ms = 0;
 static uint32_t last_summary_ms = 0;
 static uint32_t last_imu_stream_ms = 0;
+static uint32_t last_wheel_stream_ms = 0;
+static uint32_t last_wheel_state_ms = 0;
 static uint32_t last_hold_update_ms = 0;
 static uint32_t tx_fail_count = 0;
 static uint32_t height_hold_start_tx_fail = 0;
@@ -83,6 +89,14 @@ static String serial_line;
 static LegKinematics kinematics;
 static ImuManager imu;
 static bool imu_stream_enabled = false;
+static bool wheel_armed = false;
+static bool wheel_encoder_online = false;
+static bool wheel_coprocessor_online = false;
+static bool wheel_stream_enabled = false;
+static uint16_t wheel_encoder_raw = 0;
+static float wheel_angle_rad = 0.0f;
+static int16_t wheel_left_pwm = 0;
+static int16_t wheel_right_pwm = 0;
 
 static float normalizeRad(float rad) {
   while (rad > kPi) rad -= kTwoPi;
@@ -162,6 +176,99 @@ static int32_t getInt32LE(const uint8_t *data) {
 static int16_t getInt16LE(const uint8_t *data) {
   return static_cast<int16_t>(static_cast<uint16_t>(data[0]) |
                               (static_cast<uint16_t>(data[1]) << 8));
+}
+
+static bool i2cDevicePresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return Wire.endTransmission() == 0;
+}
+
+static void scanI2cBus() {
+  Serial.printf("I2C scan on SDA=GPIO%d SCL=GPIO%d:\n", I2C_SDA_PIN, I2C_SCL_PIN);
+  int found = 0;
+  for (uint8_t addr = 1; addr < 0x7f; ++addr) {
+    if (i2cDevicePresent(addr)) {
+      Serial.printf("  found 0x%02X", addr);
+      if (addr == MPU6050_I2C_ADDR) Serial.print(" MPU6050");
+      if (addr == WHEEL_PWM_COPROCESSOR_I2C_ADDR) Serial.print(" STM32F103-wheel-pwm");
+      if (addr == WHEEL_ENCODER_I2C_ADDR) Serial.print(" wheel-encoder");
+      Serial.println();
+      found++;
+    }
+  }
+  Serial.printf("I2C scan done, %d device(s)\n", found);
+}
+
+static bool readWheelEncoder() {
+  // Default wheel encoder protocol is AS5600-compatible:
+  // register 0x0C = raw angle high bits, 0x0D = raw angle low bits.
+  Wire.beginTransmission(WHEEL_ENCODER_I2C_ADDR);
+  Wire.write(0x0C);
+  if (Wire.endTransmission(false) != 0) {
+    wheel_encoder_online = false;
+    return false;
+  }
+
+  const uint8_t got = Wire.requestFrom(WHEEL_ENCODER_I2C_ADDR, static_cast<uint8_t>(2));
+  if (got != 2 || Wire.available() < 2) {
+    wheel_encoder_online = false;
+    return false;
+  }
+
+  const uint8_t high = Wire.read();
+  const uint8_t low = Wire.read();
+  wheel_encoder_raw = static_cast<uint16_t>(((high & 0x0f) << 8) | low);
+  wheel_angle_rad = static_cast<float>(wheel_encoder_raw) * kTwoPi / 4096.0f;
+  wheel_encoder_online = true;
+  return true;
+}
+
+static bool sendWheelPwmToCoprocessor(int16_t left_pwm, int16_t right_pwm) {
+  left_pwm = constrain(left_pwm, -kWheelPwmLimit, kWheelPwmLimit);
+  right_pwm = constrain(right_pwm, -kWheelPwmLimit, kWheelPwmLimit);
+
+  Wire.beginTransmission(WHEEL_PWM_COPROCESSOR_I2C_ADDR);
+  Wire.write(0x10);  // command register: set signed wheel PWM pair
+  Wire.write(static_cast<uint8_t>(left_pwm & 0xff));
+  Wire.write(static_cast<uint8_t>((left_pwm >> 8) & 0xff));
+  Wire.write(static_cast<uint8_t>(right_pwm & 0xff));
+  Wire.write(static_cast<uint8_t>((right_pwm >> 8) & 0xff));
+  const bool ok = Wire.endTransmission() == 0;
+
+  wheel_coprocessor_online = ok;
+  if (ok) {
+    wheel_left_pwm = left_pwm;
+    wheel_right_pwm = right_pwm;
+  }
+  return ok;
+}
+
+static void stopWheelPwm() {
+  wheel_left_pwm = 0;
+  wheel_right_pwm = 0;
+  (void)sendWheelPwmToCoprocessor(0, 0);
+}
+
+static void updateWheelDevices() {
+  (void)readWheelEncoder();
+  wheel_coprocessor_online = i2cDevicePresent(WHEEL_PWM_COPROCESSOR_I2C_ADDR);
+
+  if (!wheel_armed && (wheel_left_pwm != 0 || wheel_right_pwm != 0)) {
+    stopWheelPwm();
+  }
+}
+
+static void printWheelStatus() {
+  Serial.printf("wheel: armed=%s f103=%s encoder=%s addr_f103=0x%02X addr_enc=0x%02X pwm_l=%d pwm_r=%d enc_raw=%u angle=%.4f rad\n",
+                wheel_armed ? "yes" : "no",
+                wheel_coprocessor_online ? "online" : "offline",
+                wheel_encoder_online ? "online" : "offline",
+                WHEEL_PWM_COPROCESSOR_I2C_ADDR,
+                WHEEL_ENCODER_I2C_ADDR,
+                wheel_left_pwm,
+                wheel_right_pwm,
+                wheel_encoder_raw,
+                wheel_angle_rad);
 }
 
 static bool sendGroup(uint32_t can_id, int first_motor_id) {
@@ -299,8 +406,14 @@ static void printHelp() {
   Serial.println("  help                  show this menu");
   Serial.println("  status                print raw and zeroed joint angles");
   Serial.println("  can                   print ESP32 TWAI/CAN controller status");
+  Serial.println("  i2cscan               scan shared I2C bus on SDA GPIO4 / SCL GPIO3");
   Serial.println("  imu                   print MPU6050 pitch/roll/yaw once");
   Serial.println("  imustream <on|off>    stream imu:pitch,roll,yaw for PioPulse/plotters");
+  Serial.println("  wheel                 print wheel I2C/PWM/encoder status");
+  Serial.println("  wheelarm              allow STM32F103 wheel PWM commands");
+  Serial.println("  wheeldisarm           force wheel PWM to 0 and disable wheel commands");
+  Serial.println("  wheelpwm <l> <r>      send signed left/right wheel PWM, -1000..1000");
+  Serial.println("  wheelstream <on|off>  stream wheel:angle,pwm_l,pwm_r");
   Serial.println("  dirs                  print direction-test checklist and current q");
   Serial.println("  arm                   allow CAN voltage output, still sends 0 mV first");
   Serial.println("  disarm                stop all output and leave safe mode");
@@ -372,6 +485,13 @@ static void printStatus() {
                 imu.getPitch(),
                 imu.getRoll(),
                 imu.getYaw());
+  Serial.printf("  wheel f103=%s encoder=%s wheel_armed=%s pwm_l=%d pwm_r=%d angle=%.4f rad\n",
+                wheel_coprocessor_online ? "online" : "offline",
+                wheel_encoder_online ? "online" : "offline",
+                wheel_armed ? "yes" : "no",
+                wheel_left_pwm,
+                wheel_right_pwm,
+                wheel_angle_rad);
 }
 
 static void printImuStatus() {
@@ -470,6 +590,11 @@ static void handleCommand(String line) {
     printCanStatus();
     return;
   }
+  if (line.equalsIgnoreCase("i2cscan")) {
+    scanI2cBus();
+    updateWheelDevices();
+    return;
+  }
   if (line.equalsIgnoreCase("imu")) {
     printImuStatus();
     return;
@@ -488,6 +613,33 @@ static void handleCommand(String line) {
     Serial.println("balance is intentionally disabled in safe bring-up firmware; use imu/imustream first");
     return;
   }
+  if (line.equalsIgnoreCase("wheel")) {
+    updateWheelDevices();
+    printWheelStatus();
+    return;
+  }
+  if (line.equalsIgnoreCase("wheelarm")) {
+    wheel_armed = true;
+    stopWheelPwm();
+    Serial.println("wheel armed: PWM output is allowed, current wheel PWM is 0");
+    return;
+  }
+  if (line.equalsIgnoreCase("wheeldisarm")) {
+    wheel_armed = false;
+    stopWheelPwm();
+    Serial.println("wheel disarmed: PWM forced to 0");
+    return;
+  }
+  if (line.equalsIgnoreCase("wheelstream on")) {
+    wheel_stream_enabled = true;
+    Serial.println("wheel stream enabled");
+    return;
+  }
+  if (line.equalsIgnoreCase("wheelstream off")) {
+    wheel_stream_enabled = false;
+    Serial.println("wheel stream disabled");
+    return;
+  }
   if (line.equalsIgnoreCase("dirs")) {
     printDirectionCheck();
     return;
@@ -503,6 +655,8 @@ static void handleCommand(String line) {
     clearCommands();
     armed = false;
     sendMotorCommands();
+    wheel_armed = false;
+    stopWheelPwm();
     Serial.println("disarmed: all outputs forced to 0 mV");
     return;
   }
@@ -510,6 +664,7 @@ static void handleCommand(String line) {
     height_hold_enabled = false;
     clearCommands();
     sendMotorCommands();
+    stopWheelPwm();
     Serial.println("stopped: all commands set to 0 mV");
     return;
   }
@@ -536,6 +691,22 @@ static void handleCommand(String line) {
   int mv = 0;
   int ms = 100;
   int sign = 0;
+  int left_pwm = 0;
+  int right_pwm = 0;
+  if (sscanf(line.c_str(), "wheelpwm %d %d", &left_pwm, &right_pwm) == 2) {
+    if (!wheel_armed) {
+      Serial.println("refused: type wheelarm first");
+      return;
+    }
+    const bool ok = sendWheelPwmToCoprocessor(static_cast<int16_t>(left_pwm),
+                                              static_cast<int16_t>(right_pwm));
+    Serial.printf("wheel PWM %s: left=%d right=%d\n",
+                  ok ? "sent" : "failed",
+                  wheel_left_pwm,
+                  wheel_right_pwm);
+    return;
+  }
+
   if (sscanf(line.c_str(), "test %d %d %d", &id, &mv, &ms) >= 2) {
     runPulseTest(id, mv, ms);
     return;
@@ -701,6 +872,10 @@ void setup() {
   Serial.println("ParallelLegRobot safe CAN leg controller");
   Serial.println("reference: foc-wheel-legged-robot control layering, adapted for 4 airborne leg motors");
   Serial.printf("CAN RX GPIO%d, CAN TX GPIO%d, 1 Mbps\n", YYT_CAN_RX_PIN, YYT_CAN_TX_PIN);
+  Serial.printf("shared I2C SDA GPIO%d, SCL GPIO%d, %lu Hz\n",
+                I2C_SDA_PIN,
+                I2C_SCL_PIN,
+                static_cast<unsigned long>(I2C_BUS_HZ));
   Serial.println("boot policy: disarmed, zero voltage output only");
 
   for (const auto &motor : kMotors) {
@@ -714,9 +889,15 @@ void setup() {
     Serial.println("CAN start failed; check ESP32C3 pins and transceiver wiring");
   }
 
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(I2C_BUS_HZ);
+  scanI2cBus();
+
   if (!imu.begin()) {
     Serial.println("IMU init skipped/failed; motor CAN bring-up can still continue");
   }
+  updateWheelDevices();
+  stopWheelPwm();
 
   if (computeTargetsFromHeight(100.0f, desired_target)) {
     for (const auto &motor : kMotors) {
@@ -748,6 +929,11 @@ void loop() {
     digitalWrite(kLedPin, armed ? ((now / 150) & 1) : ((now / 1000) & 1));
   }
 
+  if (now - last_wheel_state_ms >= kWheelStatePeriodMs) {
+    last_wheel_state_ms = now;
+    updateWheelDevices();
+  }
+
   if (imu_stream_enabled && imu.isConnected() && now - last_imu_stream_ms >= kImuStreamPeriodMs) {
     last_imu_stream_ms = now;
     Serial.printf("imu:%.2f,%.2f,%.2f,0.0,0.0,0.0\n",
@@ -756,14 +942,26 @@ void loop() {
                   imu.getYaw());
   }
 
+  if (wheel_stream_enabled && now - last_wheel_stream_ms >= kImuStreamPeriodMs) {
+    last_wheel_stream_ms = now;
+    Serial.printf("wheel:%.4f,%d,%d,%s,%s\n",
+                  wheel_angle_rad,
+                  wheel_left_pwm,
+                  wheel_right_pwm,
+                  wheel_coprocessor_online ? "f103_online" : "f103_offline",
+                  wheel_encoder_online ? "enc_online" : "enc_offline");
+  }
+
   if (now - last_summary_ms >= kSummaryPeriodMs) {
     last_summary_ms = now;
-    Serial.printf("online: ID1=%s ID2=%s ID5=%s ID6=%s armed=%s hold=%s\n",
+    Serial.printf("online: ID1=%s ID2=%s ID5=%s ID6=%s armed=%s hold=%s wheel_f103=%s wheel_enc=%s\n",
                   isMotorOnline(1) ? "yes" : "no",
                   isMotorOnline(2) ? "yes" : "no",
                   isMotorOnline(5) ? "yes" : "no",
                   isMotorOnline(6) ? "yes" : "no",
                   armed ? "yes" : "no",
-                  height_hold_enabled ? "on" : "off");
+                  height_hold_enabled ? "on" : "off",
+                  wheel_coprocessor_online ? "yes" : "no",
+                  wheel_encoder_online ? "yes" : "no");
   }
 }

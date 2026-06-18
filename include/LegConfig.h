@@ -42,11 +42,21 @@ const float LIMIT_Y_MIN = -130.0f;
 const float LIMIT_Y_MAX = -60.0f;
 
 // ==========================================
-// IMU MPU6050 I2C 引脚配置 (避开电机引脚，使用标准引脚并连接上拉电阻)
+// Shared I2C bus on the custom ESP32-C3 main board.
+// Devices on this bus:
+//   - MPU6050 IMU, default 0x68
+//   - STM32F103C8T6 wheel PWM coprocessor, default 0x12
+//   - Wheel magnetic encoder, default AS5600 address 0x36
 // ==========================================
-const int IMU_SDA_PIN = 5;
-const int IMU_SCL_PIN = 4;
+const int I2C_SCL_PIN = 3;
+const int I2C_SDA_PIN = 4;
+const uint32_t I2C_BUS_HZ = 400000;
+
+const int IMU_SDA_PIN = I2C_SDA_PIN;
+const int IMU_SCL_PIN = I2C_SCL_PIN;
+const uint8_t MPU6050_I2C_ADDR = 0x68;
+const uint8_t WHEEL_PWM_COPROCESSOR_I2C_ADDR = 0x12;
+const uint8_t WHEEL_ENCODER_I2C_ADDR = 0x36;
 
 #endif // LEG_CONFIG_H
-
 
