@@ -4,7 +4,7 @@
 
 #include "stm32g431xx.h"
 #include "FOC.h"
-#include "Usart.h"
+#include "usart.h"
 #include "main.h"
 #include "mt6816.h"
 

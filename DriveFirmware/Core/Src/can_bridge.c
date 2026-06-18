@@ -29,7 +29,13 @@
 #define CAN_ZERO_APPROACH_RAD   0.12f
 
 #ifndef DRIVE_ZERO_RAD
-#if DRIVE_ID == 6
+#if DRIVE_ID == 1
+#define DRIVE_ZERO_RAD          4.860f
+#elif DRIVE_ID == 2
+#define DRIVE_ZERO_RAD          5.553f
+#elif DRIVE_ID == 5
+#define DRIVE_ZERO_RAD          0.161f
+#elif DRIVE_ID == 6
 #define DRIVE_ZERO_RAD          1.991f
 #else
 #define DRIVE_ZERO_RAD          0.0f

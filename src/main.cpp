@@ -567,6 +567,7 @@ static void printHelp() {
   Serial.println("  invert <id>           flip one runtime joint direction");
   Serial.println("  confirm_dirs          unlock height hold after manual direction check");
   Serial.println("  zero6                 ID6 drive-side zero-position hold; stop/disarm exits");
+  Serial.println("  zero <id>             drive-side zero-position hold for specific ID (1|2|5|6)");
   Serial.println("  zero                  slowly return all four joints to q=0 and hold");
   Serial.println("  height <mm>           slow hold, allowed range 80..120, example: height 100");
   Serial.println("  stand                 relative mirrored leg pose from current q, then hold");
@@ -842,17 +843,31 @@ static void handleCommand(String line) {
     }
     return;
   }
+  int zero_id = 0;
+  bool do_drive_zero = false;
   if (line.equalsIgnoreCase("zero6")) {
+    zero_id = 6;
+    do_drive_zero = true;
+  } else if (sscanf(line.c_str(), "zero %d", &zero_id) == 1) {
+    if (zero_id == 1 || zero_id == 2 || zero_id == 5 || zero_id == 6) {
+      do_drive_zero = true;
+    } else {
+      Serial.println("refused: invalid joint motor ID for drive-side zero hold, use 1, 2, 5, or 6");
+      return;
+    }
+  }
+
+  if (do_drive_zero) {
     if (!armed) {
       Serial.println("refused: type arm first");
       return;
     }
-    if (!isMotorOnline(6)) {
-      Serial.println("refused: ID6 is offline");
+    if (!isMotorOnline(zero_id)) {
+      Serial.printf("refused: ID%d is offline\n", zero_id);
       return;
     }
-    if (fabsf(motor_state[6].joint_rad) > kJointSoftLimitRad) {
-      Serial.println("refused: ID6 current joint is outside soft limit");
+    if (fabsf(motor_state[zero_id].joint_rad) > kJointSoftLimitRad) {
+      Serial.printf("refused: ID%d current joint is outside soft limit\n", zero_id);
       return;
     }
     twai_status_info_t can_status = {};
@@ -862,12 +877,13 @@ static void handleCommand(String line) {
     }
     height_hold_enabled = false;
     clearCommands();
-    desired_target[6] = 0.0f;
-    ramped_target[6] = motor_state[6].joint_rad;
-    command_mv[6] = kDriveZeroHoldMv;
-    Serial.printf("ID6 drive-side zero hold enabled: command %+d mV sentinel, drive target raw %.3f rad, stop/disarm exits\n",
-                  command_mv[6],
-                  findMotor(6)->zero_rad);
+    desired_target[zero_id] = 0.0f;
+    ramped_target[zero_id] = motor_state[zero_id].joint_rad;
+    command_mv[zero_id] = kDriveZeroHoldMv;
+    Serial.printf("ID%d drive-side zero hold enabled: command %+d mV sentinel, drive target raw %.3f rad, stop/disarm exits\n",
+                  zero_id,
+                  command_mv[zero_id],
+                  findMotor(zero_id)->zero_rad);
     return;
   }
   if (line.equalsIgnoreCase("zero")) {
