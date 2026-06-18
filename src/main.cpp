@@ -311,8 +311,10 @@ static void stopWheelPwm() {
 }
 
 static void updateWheelDevices() {
-  left_wheel_encoder_online = readAS5600Encoder(LEFT_WHEEL_ENCODER_I2C_ADDR, left_wheel_encoder_raw, left_wheel_angle_rad);
-  right_wheel_encoder_online = readAS5600Encoder(RIGHT_WHEEL_ENCODER_I2C_ADDR, right_wheel_encoder_raw, right_wheel_angle_rad);
+  left_wheel_encoder_online = i2cDevicePresent(LEFT_WHEEL_ENCODER_I2C_ADDR) &&
+                              readAS5600Encoder(LEFT_WHEEL_ENCODER_I2C_ADDR, left_wheel_encoder_raw, left_wheel_angle_rad);
+  right_wheel_encoder_online = i2cDevicePresent(RIGHT_WHEEL_ENCODER_I2C_ADDR) &&
+                               readAS5600Encoder(RIGHT_WHEEL_ENCODER_I2C_ADDR, right_wheel_encoder_raw, right_wheel_angle_rad);
   wheel_coprocessor_online = i2cDevicePresent(WHEEL_PWM_COPROCESSOR_I2C_ADDR);
 
   if (!wheel_armed && (wheel_left_pwm != 0 || wheel_right_pwm != 0)) {
