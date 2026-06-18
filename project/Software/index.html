@@ -1,0 +1,1064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VAPOROS // COPROCESSOR CONTROLLER 2026</title>
+  <!-- Typography -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  
+  <style>
+    /* Design Tokens */
+    :root {
+      --bg-dark: #0A0712;
+      --neon-pink: #FF4FD8;
+      --neon-cyan: #2BE4FF;
+      --accent-purple: #8A4FFF;
+      --sunset-orange: #FF9E57;
+      --grid-line: #2D2142;
+      --text-color: #E8E8F0;
+      --phosphor-glow: 0 0 10px rgba(255, 79, 216, 0.4);
+      --cyan-glow: 0 0 10px rgba(43, 228, 255, 0.4);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-color);
+      font-family: 'JetBrains Mono', 'IBM Plex Mono', monospace;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* Infinite Perspective Grid Background */
+    .neon-grid {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: 300px;
+      background-image: 
+        linear-gradient(to right, rgba(138, 79, 255, 0.08) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(138, 79, 255, 0.08) 1px, transparent 1px);
+      background-size: 50px 50px;
+      transform: perspective(250px) rotateX(65deg);
+      transform-origin: top;
+      animation: grid-roll 6s linear infinite;
+      z-index: 1;
+      pointer-events: none;
+    }
+
+    @keyframes grid-roll {
+      from { background-position: 0 0; }
+      to { background-position: 0 300px; }
+    }
+
+    /* Ambient Vapor Sunset Background Glow */
+    .sunset-glow {
+      position: absolute;
+      bottom: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 600px;
+      height: 300px;
+      background: radial-gradient(circle, rgba(255, 158, 87, 0.15) 0%, rgba(255, 79, 216, 0.05) 50%, transparent 100%);
+      z-index: 0;
+      pointer-events: none;
+      filter: blur(40px);
+    }
+
+    /* CRT Scanline and Screen Flickers */
+    .crt-effect {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+      background-size: 100% 4px, 3px 100%;
+      z-index: 9999;
+      pointer-events: none;
+      opacity: 0.85;
+    }
+
+    .crt-flicker {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(255, 79, 216, 0.015);
+      z-index: 9998;
+      pointer-events: none;
+      animation: screen-flicker 0.15s infinite;
+    }
+
+    @keyframes screen-flicker {
+      0% { opacity: 0.97; }
+      50% { opacity: 1; }
+      100% { opacity: 0.98; }
+    }
+
+    /* Main Container */
+    #app-container {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      z-index: 10;
+      padding: 15px;
+      gap: 15px;
+    }
+
+    /* Header Screen */
+    header {
+      border: 2px double var(--neon-pink);
+      box-shadow: var(--phosphor-glow);
+      background: rgba(10, 7, 18, 0.85);
+      padding: 10px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .logo-ascii {
+      font-size: 6px;
+      line-height: 5px;
+      color: var(--neon-pink);
+      text-shadow: var(--phosphor-glow);
+      white-space: pre;
+    }
+
+    .sys-info {
+      text-align: right;
+    }
+
+    .sys-info h1 {
+      font-size: 20px;
+      letter-spacing: 4px;
+      color: var(--neon-cyan);
+      text-shadow: var(--cyan-glow);
+      margin-bottom: 5px;
+    }
+
+    .sys-info p {
+      font-size: 11px;
+      color: var(--sunset-orange);
+    }
+
+    /* Content Area */
+    .workspace {
+      display: flex;
+      flex: 1;
+      gap: 15px;
+      min-height: 0; /* Important for flex child scrolling */
+    }
+
+    /* Sidebar Navigation */
+    nav {
+      width: 220px;
+      border: 2px solid var(--grid-line);
+      background: rgba(10, 7, 18, 0.9);
+      padding: 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .nav-header {
+      font-size: 12px;
+      color: var(--accent-purple);
+      margin-bottom: 10px;
+      border-bottom: 1px solid var(--grid-line);
+      padding-bottom: 5px;
+    }
+
+    .nav-btn {
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-color);
+      padding: 8px 12px;
+      font-family: inherit;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      transition: all 0.2s ease;
+    }
+
+    .nav-btn:hover {
+      border-color: var(--neon-pink);
+      color: var(--neon-pink);
+      text-shadow: var(--phosphor-glow);
+      background: rgba(255, 79, 216, 0.05);
+    }
+
+    .nav-btn.active {
+      border-color: var(--neon-cyan);
+      color: var(--neon-cyan);
+      text-shadow: var(--cyan-glow);
+      background: rgba(43, 228, 255, 0.05);
+    }
+
+    /* Main Console Display Area */
+    main {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 3fr 2fr;
+      gap: 15px;
+      min-height: 0;
+    }
+
+    /* Panel Card Styles */
+    .panel-card {
+      border: 2px solid var(--neon-pink);
+      box-shadow: var(--phosphor-glow);
+      background: rgba(10, 7, 18, 0.9);
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .panel-card.cyan-theme {
+      border-color: var(--neon-cyan);
+      box-shadow: var(--cyan-glow);
+    }
+
+    .panel-header {
+      background: var(--grid-line);
+      padding: 6px 12px;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .panel-header-title {
+      font-weight: bold;
+      color: var(--text-color);
+      letter-spacing: 2px;
+    }
+
+    .panel-body {
+      padding: 15px;
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 15px;
+      min-height: 0;
+    }
+
+    /* Terminal Console Panel */
+    .terminal-body {
+      background: #000;
+      color: #3f3;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 13px;
+      display: flex;
+      flex-direction: column;
+      padding: 10px;
+      flex: 1;
+      min-height: 0;
+      border: 1px solid var(--grid-line);
+    }
+
+    .terminal-logs {
+      flex: 1;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin-bottom: 10px;
+    }
+
+    .terminal-input-row {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      border-top: 1px solid var(--grid-line);
+      padding-top: 5px;
+    }
+
+    .terminal-prompt {
+      color: var(--neon-pink);
+      font-weight: bold;
+    }
+
+    .terminal-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #3f3;
+      font-family: inherit;
+      font-size: inherit;
+    }
+
+    /* Dashboard Widgets & Gauges */
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+
+    .status-group {
+      border: 1px solid var(--grid-line);
+      padding: 8px 12px;
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .status-title {
+      font-size: 11px;
+      color: var(--accent-purple);
+    }
+
+    .status-val {
+      font-size: 16px;
+      font-weight: bold;
+    }
+
+    .status-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 5px;
+      background-color: #555;
+    }
+
+    .status-indicator.active {
+      background-color: var(--neon-cyan);
+      box-shadow: 0 0 8px var(--neon-cyan);
+    }
+
+    .status-indicator.error {
+      background-color: var(--neon-pink);
+      box-shadow: 0 0 8px var(--neon-pink);
+    }
+
+    /* Controls Grid */
+    .btn-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+
+    /* Buttons Style */
+    .retro-btn {
+      background: transparent;
+      border: 1px solid var(--neon-pink);
+      box-shadow: var(--phosphor-glow);
+      color: var(--neon-pink);
+      font-family: inherit;
+      padding: 10px 15px;
+      font-weight: bold;
+      cursor: pointer;
+      font-size: 13px;
+      letter-spacing: 2px;
+      transition: all 0.2s ease;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .retro-btn:hover {
+      background: rgba(255, 79, 216, 0.15);
+      border-color: var(--neon-pink);
+      box-shadow: 0 0 15px var(--neon-pink);
+    }
+
+    .retro-btn.cyan-btn {
+      border-color: var(--neon-cyan);
+      box-shadow: var(--cyan-glow);
+      color: var(--neon-cyan);
+    }
+
+    .retro-btn.cyan-btn:hover {
+      background: rgba(43, 228, 255, 0.15);
+      box-shadow: 0 0 15px var(--neon-cyan);
+    }
+
+    .retro-btn.sunset-btn {
+      border-color: var(--sunset-orange);
+      box-shadow: 0 0 10px rgba(255, 158, 87, 0.3);
+      color: var(--sunset-orange);
+    }
+
+    .retro-btn.sunset-btn:hover {
+      background: rgba(255, 158, 87, 0.15);
+      box-shadow: 0 0 15px var(--sunset-orange);
+    }
+
+    /* Slider Container */
+    .slider-container {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border: 1px dashed var(--grid-line);
+      padding: 10px;
+    }
+
+    .slider-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--sunset-orange);
+    }
+
+    .retro-slider {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 6px;
+      background: var(--grid-line);
+      outline: none;
+      border: 1px solid var(--accent-purple);
+    }
+
+    .retro-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      background: var(--neon-pink);
+      box-shadow: var(--phosphor-glow);
+      border: 1px solid var(--text-color);
+      cursor: pointer;
+    }
+
+    /* ASCII progress gauge style */
+    .ascii-bar {
+      font-family: monospace;
+      color: var(--neon-cyan);
+      letter-spacing: 1px;
+    }
+
+    /* Sound Switch Toggle */
+    .mute-toggle {
+      background: transparent;
+      border: 1px solid var(--accent-purple);
+      color: var(--accent-purple);
+      padding: 4px 8px;
+      font-size: 10px;
+      cursor: pointer;
+    }
+    
+    .mute-toggle.active {
+      color: var(--sunset-orange);
+      border-color: var(--sunset-orange);
+    }
+
+    /* Enter overlay for sound context init */
+    #intro-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background-color: var(--bg-dark);
+      z-index: 10000;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .intro-ascii {
+      font-family: monospace;
+      color: var(--neon-pink);
+      text-shadow: var(--phosphor-glow);
+      font-size: 11px;
+      line-height: 12px;
+      white-space: pre;
+      margin-bottom: 20px;
+    }
+
+    .intro-title {
+      font-size: 24px;
+      letter-spacing: 8px;
+      color: var(--neon-cyan);
+      text-shadow: var(--cyan-glow);
+      margin-bottom: 30px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Retro Screen effects -->
+  <div class="crt-effect"></div>
+  <div class="crt-flicker"></div>
+  <div class="neon-grid"></div>
+  <div class="sunset-glow"></div>
+
+  <!-- Audio unlock dialog -->
+  <div id="intro-overlay">
+    <div class="intro-ascii">
+         ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+         █                           █
+         █       V A P O R O S       █
+         █                           █
+         ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+
+                \  |  /
+              --- ☼ ---
+                / | \
+
+        ═══════════════════════
+          N E O N  H O R I Z O N
+        ═══════════════════════
+    </div>
+    <div class="intro-title">NEON HORIZON COPROCESSOR</div>
+    <button class="retro-btn" onclick="enterSystem()">[ ENTER SYSTEM ]</button>
+  </div>
+
+  <!-- Main System App Layout -->
+  <div id="app-container">
+    
+    <header>
+      <div class="logo-ascii">
+▒█░░▒█ ▒█▀▀█ ▒█▀▀█ ▒█▀▀▀█ ▒█▀▀█ ▒█▀▀▀█ ▒█▀▀▀█ 
+░▒█▒█░ ▒█▄▄█ ▒█▄▄█ ▒█░░▒█ ▒█▄▄▀ ▒█░░▒█ ░▀▀▀▄▄ 
+░░▀▄▀░ ▒█░░░ ▒█░░░ ▒█▄▄▄█ ▒█░▒█ ▒█▄▄▄█ ▒█▄▄▄█
+      </div>
+      <div class="sys-info">
+        <h1>VAPOROS // SYSTEM_2026</h1>
+        <p>BAUD: 115200 // ADDR: 0x12 // STATUS: <span id="conn-text" style="color: var(--neon-pink);">OFFLINE</span></p>
+      </div>
+    </header>
+
+    <div class="workspace">
+      
+      <!-- Left navigation panel -->
+      <nav>
+        <div class="nav-header">SYSTEM OPTIONS</div>
+        <button class="nav-btn active" onclick="switchTab('dashboard')">[>] DASHBOARD</button>
+        <button class="nav-btn" onclick="switchTab('terminal')">[~] TERMINAL</button>
+        <button class="nav-btn" onclick="switchTab('settings')">[@] CONFIG</button>
+        
+        <div class="nav-header" style="margin-top: 20px;">SOUNDSCAPE</div>
+        <button class="mute-toggle active" id="audio-toggle" onclick="toggleAudio()">MUTE RETRO SOUNDS: ON</button>
+      </nav>
+
+      <!-- Center displays -->
+      <main>
+        
+        <!-- Tab 1: Dashboard Panel -->
+        <section id="tab-dashboard" class="panel-card">
+          <div class="panel-header">
+            <span class="panel-header-title">░░ TELEMETRY MONITOR ░░</span>
+            <span style="font-size: 10px; color: var(--sunset-orange);">SYS_RUN: OK</span>
+          </div>
+          
+          <div class="panel-body">
+            
+            <div class="dashboard-grid">
+              <div class="status-group">
+                <span class="status-title">LEG JOINT MOTOR LINK</span>
+                <span class="status-val">
+                  <span class="status-indicator" id="ind-id1"></span>ID1
+                  <span class="status-indicator" id="ind-id2"></span>ID2
+                  <span class="status-indicator" id="ind-id5"></span>ID5
+                  <span class="status-indicator" id="ind-id6"></span>ID6
+                </span>
+              </div>
+              <div class="status-group">
+                <span class="status-title">WHEEL COPROCESSOR (F103)</span>
+                <span class="status-val" id="val-f103" style="color: var(--neon-pink);">OFFLINE</span>
+              </div>
+              <div class="status-group">
+                <span class="status-title">WHEEL ENCODERS (AS5600)</span>
+                <span class="status-val" style="font-size: 13px;">
+                  <span class="status-indicator" id="ind-enc-l"></span>LEFT
+                  <span class="status-indicator" id="ind-enc-r"></span>RIGHT
+                </span>
+              </div>
+              <div class="status-group">
+                <span class="status-title">LEG MOTOR CONTROL STATE</span>
+                <span class="status-val" id="val-leg-state" style="color: var(--sunset-orange);">STANDBY</span>
+              </div>
+            </div>
+
+            <!-- Left and Right Wheel details -->
+            <div class="dashboard-grid">
+              <div class="status-group" style="grid-column: span 2; border-color: var(--neon-cyan);">
+                <span class="status-title" style="color: var(--neon-cyan);">LEFT WHEEL FEEDBACK</span>
+                <span class="status-val" style="font-size: 13px; font-family: monospace;">
+                  RAW: <span id="val-raw-l">0000</span> | ANGLE: <span id="val-ang-l">0.0000</span> rad | TARGET_PWM: <span id="val-pwm-l">0</span>
+                </span>
+                <div class="ascii-bar" id="bar-left">[--------------------] 0%</div>
+              </div>
+              
+              <div class="status-group" style="grid-column: span 2; border-color: var(--neon-cyan);">
+                <span class="status-title" style="color: var(--neon-cyan);">RIGHT WHEEL FEEDBACK</span>
+                <span class="status-val" style="font-size: 13px; font-family: monospace;">
+                  RAW: <span id="val-raw-r">0000</span> | ANGLE: <span id="val-ang-r">0.0000</span> rad | TARGET_PWM: <span id="val-pwm-r">0</span>
+                </span>
+                <div class="ascii-bar" id="bar-right">[--------------------] 0%</div>
+              </div>
+            </div>
+            
+            <!-- CPU, Memory, Graphic resources gauges -->
+            <div style="margin-top: 10px;">
+              <div class="status-title" style="margin-bottom: 5px;">CYBER DECK RESOURCES</div>
+              <div style="font-size: 12px; font-family: monospace; line-height: 18px;">
+                CPU: <span class="ascii-bar" style="color: var(--neon-pink);">████████████░░░░░░░░ 60%</span><br>
+                MEM: <span class="ascii-bar" style="color: var(--neon-cyan);">████████░░░░░░░░░░░░ 40%</span><br>
+                JTG: <span class="ascii-bar" style="color: var(--sunset-orange);">██████████░░░░░░░░░░ 50%</span>
+              </div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- Right Side: Control Actions Panel -->
+        <section class="panel-card cyan-theme">
+          <div class="panel-header">
+            <span class="panel-header-title">══ CONTROL MATRIX ══</span>
+            <button class="retro-btn" style="padding: 2px 10px; font-size: 10px;" onclick="connectSerial()">CONNECT</button>
+          </div>
+          
+          <div class="panel-body">
+            
+            <div class="nav-header">WHEEL FOC MOTORS</div>
+            <div class="btn-grid">
+              <button class="retro-btn cyan-btn" onclick="send('wheelarm')">WHEEL ARM</button>
+              <button class="retro-btn" onclick="send('wheeldisarm')">WHEEL DISARM</button>
+            </div>
+
+            <!-- Dynamic Slider sending wheelpwm -->
+            <div class="slider-container">
+              <div class="slider-header">
+                <span>LEFT WHEEL SPEED COMMAND</span>
+                <span id="label-pwm-slider-l">0</span>
+              </div>
+              <input type="range" class="retro-slider" id="slider-pwm-l" min="-1000" max="1000" value="0" oninput="updatePwmCommand()">
+            </div>
+            
+            <div class="slider-container">
+              <div class="slider-header">
+                <span>RIGHT WHEEL SPEED COMMAND</span>
+                <span id="label-pwm-slider-r">0</span>
+              </div>
+              <input type="range" class="retro-slider" id="slider-pwm-r" min="-1000" max="1000" value="0" oninput="updatePwmCommand()">
+            </div>
+            
+            <div class="btn-grid" style="grid-template-columns: 1fr;">
+              <button class="retro-btn sunset-btn" onclick="resetPwmSliders()">EMERGENCY WHEEL STOP</button>
+            </div>
+
+            <div class="nav-header" style="margin-top: 15px;">LEG JOINT MOTORS</div>
+            <div class="btn-grid">
+              <button class="retro-btn cyan-btn" onclick="send('arm')">LEG MOTOR ARM</button>
+              <button class="retro-btn" onclick="send('disarm')">LEG MOTOR DISARM</button>
+            </div>
+            
+            <div class="btn-grid">
+              <button class="retro-btn sunset-btn" onclick="send('zero')">ENABLE ZERO HOLD</button>
+              <button class="retro-btn" onclick="send('holdoff')">DISABLE HOLD</button>
+            </div>
+
+            <div class="btn-grid">
+              <button class="retro-btn" style="font-size: 10px; padding: 6px;" onclick="send('zero 1')">ZERO ID1</button>
+              <button class="retro-btn" style="font-size: 10px; padding: 6px;" onclick="send('zero 2')">ZERO ID2</button>
+              <button class="retro-btn" style="font-size: 10px; padding: 6px;" onclick="send('zero 5')">ZERO ID5</button>
+              <button class="retro-btn" style="font-size: 10px; padding: 6px;" onclick="send('zero 6')">ZERO ID6</button>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- Tab 2: Terminal Console Display (Hidden by default, switched dynamically) -->
+        <section id="tab-terminal" class="panel-card" style="grid-column: span 2; display: none;">
+          <div class="panel-header">
+            <span class="panel-header-title">░░ SYSTEM_SHELL_2026 ░░</span>
+            <span style="font-size: 10px; color: var(--neon-cyan);">LOGS STREAMS: ENABLED</span>
+          </div>
+          <div class="panel-body" style="padding: 10px;">
+            <div class="terminal-body">
+              <div class="terminal-logs" id="terminal-output">VAPOROS V1.0 // INITIALIZATION SUCCESS
+READY FOR CONNECTION...</div>
+              <div class="terminal-input-row">
+                <span class="terminal-prompt">VAPOR://SYS></span>
+                <input type="text" class="terminal-input" id="terminal-input" placeholder="type command (help, status, wheel, can)..." onkeydown="handleTerminalKey(event)">
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Tab 3: Configuration & Diagnostic Settings (Hidden by default) -->
+        <section id="tab-settings" class="panel-card" style="grid-column: span 2; display: none;">
+          <div class="panel-header">
+            <span class="panel-header-title">══ SYSTEM DIAGNOSTIC OPTIONS ══</span>
+          </div>
+          <div class="panel-body">
+            <div class="nav-header">HARDWARE UTILITIES</div>
+            <div class="btn-grid">
+              <button class="retro-btn cyan-btn" onclick="send('i2cscan')">RUN I2C BUS SCAN</button>
+              <button class="retro-btn" onclick="send('can')">CHECK CAN STATUS</button>
+              <button class="retro-btn" onclick="send('dirs')">CHECK MOTOR DIRECTIONS</button>
+              <button class="retro-btn sunset-btn" onclick="send('confirm_dirs')">CONFIRM JOINT DIRECTIONS</button>
+            </div>
+            
+            <div class="nav-header" style="margin-top: 20px;">TELEMETRY STREAM SWITCH</div>
+            <div class="btn-grid">
+              <button class="retro-btn" onclick="send('imustream on')">IMU STREAM ON</button>
+              <button class="retro-btn" onclick="send('imustream off')">IMU STREAM OFF</button>
+              <button class="retro-btn" onclick="send('wheelstream on')">WHEEL STREAM ON</button>
+              <button class="retro-btn" onclick="send('wheelstream off')">WHEEL STREAM OFF</button>
+            </div>
+            
+            <div class="status-group" style="margin-top: 15px;">
+              <span class="status-title">RETRO INFORMATION ARCHIVE</span>
+              <p style="font-size: 11px; line-height: 16px; color: var(--text-color);">
+                Coprocessor control addresses map: LEFT_AS5600 at <span style="color: var(--neon-cyan)">0x36</span>, RIGHT_AS5600 at <span style="color: var(--neon-cyan)">0x38</span>. STM32F103 PWM coprocessor receives raw I2C package commands at <span style="color: var(--neon-pink)">0x12</span>. Joint angles must be checked before engaging dynamic balancer. Avoid motor saturation.
+              </p>
+            </div>
+          </div>
+        </section>
+
+      </main>
+
+    </div>
+
+  </div>
+
+  <script>
+    // Web Audio API Synth Engine
+    let audioCtx;
+    let mainGainNode;
+    let crtHumOsc;
+    let soundMuted = false;
+
+    function initAudio() {
+      if (audioCtx) return;
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        mainGainNode = audioCtx.createGain();
+        mainGainNode.gain.setValueAtTime(0.12, audioCtx.currentTime);
+        mainGainNode.connect(audioCtx.destination);
+        
+        // Start CRT hum sound (subtle low pitch)
+        crtHumOsc = audioCtx.createOscillator();
+        const humGain = audioCtx.createGain();
+        humGain.gain.setValueAtTime(0.02, audioCtx.currentTime);
+        
+        crtHumOsc.type = 'sine';
+        crtHumOsc.frequency.setValueAtTime(60, audioCtx.currentTime); // 60Hz hum
+        
+        crtHumOsc.connect(humGain);
+        humGain.connect(mainGainNode);
+        crtHumOsc.start();
+      } catch (err) {
+        console.warn('Audio Context error: ', err);
+      }
+    }
+
+    // Zero-dependency sound synthesizers
+    function playBeep(freq, type, duration, vol) {
+      if (soundMuted || !audioCtx) return;
+      try {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        
+        osc.type = type || 'sine';
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        
+        gain.gain.setValueAtTime(vol || 0.1, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        
+        osc.connect(gain);
+        gain.connect(mainGainNode);
+        
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+      } catch (err) {}
+    }
+
+    function playBootSound() {
+      // Synthwave ambient chime
+      playBeep(220, 'sawtooth', 0.8, 0.05);
+      setTimeout(() => playBeep(277.18, 'sawtooth', 0.8, 0.05), 150);
+      setTimeout(() => playBeep(329.63, 'sawtooth', 0.8, 0.05), 300);
+      setTimeout(() => playBeep(440, 'sine', 1.2, 0.1), 450);
+    }
+
+    function playClickSound() {
+      // Mechanical keyboard switch sound
+      if (soundMuted || !audioCtx) return;
+      try {
+        // High frequency transient
+        playBeep(1800, 'triangle', 0.03, 0.08);
+        playBeep(120, 'sine', 0.04, 0.05);
+      } catch (err) {}
+    }
+
+    function toggleAudio() {
+      soundMuted = !soundMuted;
+      const btn = document.getElementById('audio-toggle');
+      if (soundMuted) {
+        btn.textContent = 'MUTE RETRO SOUNDS: ON';
+        btn.classList.add('active');
+        if (mainGainNode) mainGainNode.gain.setValueAtTime(0, audioCtx.currentTime);
+      } else {
+        btn.textContent = 'MUTE RETRO SOUNDS: OFF';
+        btn.classList.remove('active');
+        initAudio();
+        if (mainGainNode) mainGainNode.gain.setValueAtTime(0.12, audioCtx.currentTime);
+        playClickSound();
+      }
+    }
+
+    function enterSystem() {
+      document.getElementById('intro-overlay').style.display = 'none';
+      initAudio();
+      playBootSound();
+    }
+
+    // Active Navigation Tabs Switcher
+    function switchTab(tabId) {
+      playClickSound();
+      // Hide all panels
+      document.getElementById('tab-dashboard').style.display = 'none';
+      document.getElementById('tab-terminal').style.display = 'none';
+      document.getElementById('tab-settings').style.display = 'none';
+      
+      // Deactivate all buttons
+      document.querySelectorAll('nav .nav-btn').forEach(btn => btn.classList.remove('active'));
+
+      // Show requested tab
+      if (tabId === 'dashboard') {
+        document.getElementById('tab-dashboard').style.display = 'flex';
+        event.currentTarget.classList.add('active');
+      } else if (tabId === 'terminal') {
+        document.getElementById('tab-terminal').style.display = 'flex';
+        event.currentTarget.classList.add('active');
+      } else if (tabId === 'settings') {
+        document.getElementById('tab-settings').style.display = 'flex';
+        event.currentTarget.classList.add('active');
+      }
+    }
+
+    // WebSerial Interface Logic
+    let port;
+    let writer;
+    let reader;
+    let rxBuffer = '';
+
+    async function connectSerial() {
+      playClickSound();
+      if (port) {
+        try {
+          if (reader) await reader.cancel();
+          await port.close();
+          port = null;
+          writer = null;
+          document.getElementById('conn-text').textContent = 'OFFLINE';
+          document.getElementById('conn-text').style.color = 'var(--neon-pink)';
+          appendLog('\n--- DISCONNECTED FROM VAPOR PORT ---');
+          return;
+        } catch (e) {
+          console.error(e);
+        }
+      }
+
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+        writer = port.writable.getWriter();
+        
+        document.getElementById('conn-text').textContent = 'CONNECTED';
+        document.getElementById('conn-text').style.color = 'var(--neon-cyan)';
+        appendLog('--- CONNECTED TO CYBERSPACE PORT ---');
+        
+        playBootSound();
+        startReadLoop();
+      } catch (err) {
+        console.error(err);
+        appendLog('SYSTEM ERROR: ' + err.message);
+      }
+    }
+
+    async function send(cmd) {
+      playClickSound();
+      if (!writer) {
+        appendLog('ERROR: Serial connection required. Click CONNECT.');
+        return;
+      }
+      try {
+        const encoder = new TextEncoder();
+        await writer.write(encoder.encode(cmd + '\n'));
+        appendLog('> ' + cmd);
+      } catch (err) {
+        console.error(err);
+        appendLog('TX FAIL: ' + err.message);
+      }
+    }
+
+    async function startReadLoop() {
+      const decoder = new TextDecoder();
+      while (port.readable) {
+        try {
+          reader = port.readable.getReader();
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            const chunk = decoder.decode(value);
+            rxBuffer += chunk;
+            
+            // Extract complete lines
+            let idx;
+            while ((idx = rxBuffer.indexOf('\n')) >= 0) {
+              const line = rxBuffer.substring(0, idx).trim();
+              rxBuffer = rxBuffer.substring(idx + 1);
+              if (line) {
+                parseTelemetry(line);
+              }
+            }
+          }
+        } catch (err) {
+          console.error(err);
+          appendLog('RX ERROR: ' + err.message);
+          break;
+        } finally {
+          if (reader) {
+            reader.releaseLock();
+          }
+        }
+      }
+    }
+
+    // Log printer
+    const logBox = document.getElementById('terminal-output');
+    function appendLog(msg) {
+      logBox.textContent += '\n' + msg;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    // Shell CLI Handler
+    function handleTerminalKey(event) {
+      if (event.key === 'Enter') {
+        const input = document.getElementById('terminal-input');
+        const cmd = input.value.trim();
+        if (cmd) {
+          send(cmd);
+          input.value = '';
+        }
+      }
+    }
+
+    // Telemetry parsers and UI state managers
+    function parseTelemetry(line) {
+      // Output directly to terminal view
+      appendLog(line);
+
+      // 1. Parsing online joint state: 
+      // online: ID1=no ID2=no ID5=no ID6=no armed=yes hold=off wheel_f103=no wheel_enc_L=no wheel_enc_R=no
+      const onlineMatch = line.match(/online:\s+ID1=(\w+)\s+ID2=(\w+)\s+ID5=(\w+)\s+ID6=(\w+)\s+armed=(\w+)\s+hold=(\w+)\s+wheel_f103=(\w+)\s+wheel_enc_L=(\w+)\s+wheel_enc_R=(\w+)/);
+      if (onlineMatch) {
+        updateIndicator('ind-id1', onlineMatch[1] === 'yes');
+        updateIndicator('ind-id2', onlineMatch[2] === 'yes');
+        updateIndicator('ind-id5', onlineMatch[3] === 'yes');
+        updateIndicator('ind-id6', onlineMatch[4] === 'yes');
+        
+        const f103Online = onlineMatch[7] === 'yes';
+        const f103Val = document.getElementById('val-f103');
+        f103Val.textContent = f103Online ? 'ONLINE' : 'OFFLINE';
+        f103Val.style.color = f103Online ? 'var(--neon-cyan)' : 'var(--neon-pink)';
+        
+        updateIndicator('ind-enc-l', onlineMatch[8] === 'yes');
+        updateIndicator('ind-enc-r', onlineMatch[9] === 'yes');
+
+        const legStateVal = document.getElementById('val-leg-state');
+        if (onlineMatch[5] === 'yes') {
+          legStateVal.textContent = onlineMatch[6] === 'on' ? 'ZERO HOLD' : 'ARMED';
+          legStateVal.style.color = 'var(--neon-cyan)';
+        } else {
+          legStateVal.textContent = 'STANDBY';
+          legStateVal.style.color = 'var(--sunset-orange)';
+        }
+      }
+
+      // 2. Parsing wheel detailed state:
+      // wheel: armed=no f103=offline left_enc=offline(0x36) raw_l=0 angle_l=0.0000 rad | right_enc=offline(0x38) raw_r=0 angle_r=0.0000 rad | pwm_l=0 pwm_r=0
+      const wheelMatch = line.match(/wheel:\s+armed=(\w+)\s+f103=(\w+)\s+left_enc=(\w+)\(.*?\)\s+raw_l=(\d+)\s+angle_l=([\d.-]+)\s+rad\s+\|\s+right_enc=(\w+)\(.*?\)\s+raw_r=(\d+)\s+angle_r=([\d.-]+)\s+rad\s+\|\s+pwm_l=([\d.-]+)\s+pwm_r=([\d.-]+)/);
+      if (wheelMatch) {
+        const rawL = parseInt(wheelMatch[4], 10);
+        const angL = parseFloat(wheelMatch[5]);
+        const pwmL = parseInt(wheelMatch[9], 10);
+        
+        const rawR = parseInt(wheelMatch[7], 10);
+        const angR = parseFloat(wheelMatch[8]);
+        const pwmR = parseInt(wheelMatch[10], 10);
+
+        document.getElementById('val-raw-l').textContent = rawL;
+        document.getElementById('val-ang-l').textContent = angL.toFixed(4);
+        document.getElementById('val-pwm-l').textContent = pwmL;
+        updateAsciiBar('bar-left', rawL, 4095);
+
+        document.getElementById('val-raw-r').textContent = rawR;
+        document.getElementById('val-ang-r').textContent = angR.toFixed(4);
+        document.getElementById('val-pwm-r').textContent = pwmR;
+        updateAsciiBar('bar-right', rawR, 4095);
+      }
+    }
+
+    function updateIndicator(id, active) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.className = 'status-indicator ' + (active ? 'active' : 'error');
+      }
+    }
+
+    function updateAsciiBar(id, val, max) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const pct = Math.max(0, Math.min(100, Math.round((val / max) * 100)));
+      const barsCount = 20;
+      const filled = Math.round((pct / 100) * barsCount);
+      let barStr = '[';
+      for (let i = 0; i < barsCount; i++) {
+        barStr += (i < filled) ? '█' : '░';
+      }
+      barStr += '] ' + pct + '%';
+      el.textContent = barStr;
+    }
+
+    // Dynamic slider controllers
+    let lastPwmSend = 0;
+    function updatePwmCommand() {
+      const valL = document.getElementById('slider-pwm-l').value;
+      const valR = document.getElementById('slider-pwm-r').value;
+      document.getElementById('label-pwm-slider-l').textContent = valL;
+      document.getElementById('label-pwm-slider-r').textContent = valR;
+      
+      const now = Date.now();
+      if (now - lastPwmSend > 80) { // Limit to ~12.5Hz on slider updates to avoid bus jamming
+        lastPwmSend = now;
+        send(`wheelpwm ${valL} ${valR}`);
+      }
+    }
+
+    function resetPwmSliders() {
+      document.getElementById('slider-pwm-l').value = 0;
+      document.getElementById('slider-pwm-r').value = 0;
+      updatePwmCommand();
+      send('wheelpwm 0 0');
+    }
+  </script>
+</body>
+</html>
