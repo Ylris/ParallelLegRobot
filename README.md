@@ -119,7 +119,15 @@ YYT MiniOdrive 使用 STM32G431，工程目录 `DriveFirmware/` 中已经包含 
 
 ### 2.5 当前软件适配状态
 
-`DriveFirmware/` 下位机固件已经是 CAN 接收方案；根目录 `src/main.cpp` 目前仍是旧版 `UART1 + GPIO 矩阵切换` 控制方式。要真正跑通这张新原理图，ESP32-C3 主控固件还需要把 `setMotorPosition()` 从串口 ASCII 指令改成 TWAI/CAN 帧发送，并把 `include/LegConfig.h` 中的 IMU I2C 引脚同步为 `SDA=GPIO5`、`SCL=GPIO4`。
+`DriveFirmware/` 下位机固件已经是 CAN 接收方案；根目录 `src/main.cpp` 当前是现场 bring-up 用的安全 CAN 主控，默认使用 `CAN_TX=GPIO6`、`CAN_RX=GPIO7`，启动后默认 `disarmed` 且输出 0 mV。
+
+截至 2026-06-18 的现场状态：
+
+* 四个腿电机 ID 为 `1/2/5/6`，均能通过 CAN 在线反馈。
+* 机械零点已写入 `config/leg_calibration.json`，主控中也固化了对应零点。
+* YYT 预编译 6V 固件在 `DriveFirmware/firmware_ids/`。
+* 主控支持串口命令 `status`、`can`、`imu`、`imustream on/off`、`arm`、`test`、`confirm_dirs`、`stand`、`height`、`holdoff`、`stop`、`disarm`。
+* 最后一次测试中 CAN 链路稳定，主控能发出 `+/-6000 mV`，但架空腿没有移动到目标；下一步优先排查电池电量、主电源限流/压降或机构卡滞。
 
 ---
 

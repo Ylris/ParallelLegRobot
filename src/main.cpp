@@ -1,384 +1,769 @@
 #include <Arduino.h>
-#include "driver/twai.h" // 引入 ESP32-C3 TWAI (CAN) 驱动
-#include "LegConfig.h"
+#include "driver/twai.h"
 #include "LegKinematics.h"
 #include "ImuManager.h"
 
-// 运动学求解器与 IMU 管理器
-LegKinematics kinematics;
-ImuManager imu;
+#ifndef YYT_CAN_RX_PIN
+#define YYT_CAN_RX_PIN 7
+#endif
 
-// 运行模式定义
-enum MotionMode {
-    MODE_STANDBY,     // 静态悬停在 (0, -100)
-    MODE_BALANCE,     // IMU 自适应反馈平衡模式
-    MODE_INTERACTIVE  // 串口控制模式
+#ifndef YYT_CAN_TX_PIN
+#define YYT_CAN_TX_PIN 6
+#endif
+
+#ifndef YYT_SAFE_MV_LIMIT
+#define YYT_SAFE_MV_LIMIT 250
+#endif
+
+#ifndef YYT_HOLD_MV_LIMIT
+#define YYT_HOLD_MV_LIMIT 180
+#endif
+
+static constexpr int kLedPin = 10;
+static constexpr float kPi = 3.14159265358979323846f;
+static constexpr float kTwoPi = 2.0f * kPi;
+static constexpr uint32_t kCommandPeriodMs = 20;
+static constexpr uint32_t kSummaryPeriodMs = 1000;
+static constexpr uint32_t kImuStreamPeriodMs = 50;
+static constexpr uint32_t kOnlineTimeoutMs = 500;
+static constexpr float kStandbyXmm = 0.0f;
+static constexpr float kStandbyYmm = -100.0f;
+static constexpr float kHeightMinMm = 80.0f;
+static constexpr float kHeightMaxMm = 120.0f;
+static constexpr float kTargetRampRadPerSec = 0.18f;
+static constexpr float kJointSoftLimitRad = 2.80f;
+static constexpr float kHoldKpMvPerRad = 3200.0f;
+static constexpr float kHoldKdMvPerRadSec = 24.0f;
+static constexpr float kHoldStaticBoostMv = 2200.0f;
+static constexpr float kHoldStaticBoostThresholdRad = 0.08f;
+static constexpr float kHoldFullPushThresholdRad = 0.05f;
+static constexpr float kStandRelativeStepRad = 0.30f;
+
+struct MotorConfig {
+  int id;
+  const char *name;
+  float zero_rad;
+  int sign;
+  int drive_sign;
 };
 
-MotionMode currentMode = MODE_STANDBY;
-
-// 目标点
-float targetX = 0.0f;
-float targetY = -100.0f;
-
-// 打印当前状态的时间控制
-unsigned long lastPrintTime = 0;
-
-// PID 控制器结构体，用于在主控端对电机进行位置闭环控制
-struct PIDController {
-    float kp;
-    float ki;
-    float kd;
-    float error_sum;
-    float last_error;
-    float max_output;
-
-    void init(float p, float i, float d, float max_out) {
-        kp = p;
-        ki = i;
-        kd = d;
-        error_sum = 0.0f;
-        last_error = 0.0f;
-        max_output = max_out;
-    }
-
-    float update(float error, float dt, float current_velocity_rad_s, bool use_velocity_feedback) {
-        error_sum += error * dt;
-        
-        // 积分限幅 (防止积分饱和，限制积分项输出不超过最大输出的50%)
-        float max_i = max_output * 0.5f;
-        if (ki > 0.0f) {
-            if (error_sum * ki > max_i) error_sum = max_i / ki;
-            if (error_sum * ki < -max_i) error_sum = -max_i / ki;
-        }
-
-        float p_term = kp * error;
-        float i_term = ki * error_sum;
-        
-        float d_term;
-        if (use_velocity_feedback) {
-            // 使用电机反馈的真实速度，避免微分噪声
-            d_term = -kd * current_velocity_rad_s;
-        } else {
-            d_term = kd * (error - last_error) / dt;
-            last_error = error;
-        }
-
-        float output = p_term + i_term + d_term;
-        if (output > max_output) output = max_output;
-        if (output < -max_output) output = -max_output;
-        return output;
-    }
+struct MotorState {
+  int32_t raw_angle_mrad = 0;
+  int16_t speed_rpm_x10 = 0;
+  uint32_t last_ms = 0;
+  float angle_rad = 0.0f;
+  float joint_rad = 0.0f;
+  float speed_rad_s = 0.0f;
 };
 
-// 全局变量：电机 PID 控制器、目标角度、当前角度、当前速度、在线状态
-PIDController motorPids[MOTOR_COUNT];
-float targetAngles[MOTOR_COUNT] = {0.0f};
-float currentAngles[MOTOR_COUNT] = {0.0f};
-float currentVelocities[MOTOR_COUNT] = {0.0f};
-bool motorFeedbackReceived[MOTOR_COUNT] = {false};
-unsigned long lastFeedbackTime[MOTOR_COUNT] = {0};
+static constexpr MotorConfig kMotors[] = {
+    {1, "left_front_upper", 4.860f, -1, 1},
+    {2, "left_rear_lower", 5.553f, 1, -1},
+    {5, "right_front_upper", 0.161f, -1, 1},
+    {6, "right_rear_lower", 1.991f, 1, 1},
+};
 
-// 辅助映射函数：DriveID 到 motorIndex
-int getMotorIndex(int driveId) {
-    if (driveId == 1) return 0; // MOTOR_L1 (左腿电机 1)
-    if (driveId == 2) return 1; // MOTOR_L2 (左腿电机 2)
-    if (driveId == 3) return 2; // MOTOR_L3 (左腿辅助电机)
-    if (driveId == 5) return 3; // MOTOR_R1 (右腿电机 1)
-    if (driveId == 6) return 4; // MOTOR_R2 (右腿电机 2)
-    if (driveId == 7) return 5; // MOTOR_R3 (右腿辅助电机)
-    return -1;
+static MotorState motor_state[9];
+static int16_t command_mv[9] = {};
+static int motor_sign[9] = {};
+static bool direction_tested[9] = {};
+static bool armed = false;
+static bool direction_confirmed = false;
+static bool height_hold_enabled = false;
+static float desired_target[9] = {};
+static float ramped_target[9] = {};
+static uint32_t last_command_ms = 0;
+static uint32_t last_summary_ms = 0;
+static uint32_t last_imu_stream_ms = 0;
+static uint32_t last_hold_update_ms = 0;
+static uint32_t tx_fail_count = 0;
+static uint32_t height_hold_start_tx_fail = 0;
+static uint32_t height_hold_start_bus_error = 0;
+static String serial_line;
+static LegKinematics kinematics;
+static ImuManager imu;
+static bool imu_stream_enabled = false;
+
+static float normalizeRad(float rad) {
+  while (rad > kPi) rad -= kTwoPi;
+  while (rad < -kPi) rad += kTwoPi;
+  return rad;
 }
 
-// 函数声明
-void processSerialInput();
-void executeTrajectory();
-bool moveToPosition(float x, float y);
-void updateBreathingLed();
-void setMotorPosition(int motorIndex, float rad);
-void initTwai();
-void receiveCanMessages();
-void sendCanCommands();
+static int16_t clampMv(long mv, int limit = YYT_SAFE_MV_LIMIT) {
+  if (mv > limit) return static_cast<int16_t>(limit);
+  if (mv < -limit) return static_cast<int16_t>(-limit);
+  return static_cast<int16_t>(mv);
+}
+
+static const MotorConfig *findMotor(int id) {
+  for (const auto &motor : kMotors) {
+    if (motor.id == id) return &motor;
+  }
+  return nullptr;
+}
+
+static bool isMotorOnline(int id) {
+  return motor_state[id].last_ms != 0 && millis() - motor_state[id].last_ms < kOnlineTimeoutMs;
+}
+
+static bool allLegMotorsOnline() {
+  for (const auto &motor : kMotors) {
+    if (!isMotorOnline(motor.id)) return false;
+  }
+  return true;
+}
+
+static bool allDirectionsTested() {
+  for (const auto &motor : kMotors) {
+    if (!direction_tested[motor.id]) return false;
+  }
+  return true;
+}
+
+static void clearCommands() {
+  for (int i = 0; i < 9; ++i) command_mv[i] = 0;
+}
+
+static void stopHeightHold(const char *reason) {
+  height_hold_enabled = false;
+  clearCommands();
+  Serial.printf("height hold stopped: %s\n", reason);
+}
+
+static const char *twaiStateName(twai_state_t state) {
+  switch (state) {
+    case TWAI_STATE_STOPPED:
+      return "stopped";
+    case TWAI_STATE_RUNNING:
+      return "running";
+    case TWAI_STATE_BUS_OFF:
+      return "bus_off";
+    case TWAI_STATE_RECOVERING:
+      return "recovering";
+    default:
+      return "unknown";
+  }
+}
+
+static void putInt16LE(uint8_t *data, int slot, int16_t value) {
+  const int offset = slot * 2;
+  data[offset] = static_cast<uint8_t>(value & 0xff);
+  data[offset + 1] = static_cast<uint8_t>((value >> 8) & 0xff);
+}
+
+static int32_t getInt32LE(const uint8_t *data) {
+  return static_cast<int32_t>(static_cast<uint32_t>(data[0]) |
+                              (static_cast<uint32_t>(data[1]) << 8) |
+                              (static_cast<uint32_t>(data[2]) << 16) |
+                              (static_cast<uint32_t>(data[3]) << 24));
+}
+
+static int16_t getInt16LE(const uint8_t *data) {
+  return static_cast<int16_t>(static_cast<uint16_t>(data[0]) |
+                              (static_cast<uint16_t>(data[1]) << 8));
+}
+
+static bool sendGroup(uint32_t can_id, int first_motor_id) {
+  twai_message_t msg = {};
+  msg.identifier = can_id;
+  msg.data_length_code = 8;
+  msg.flags = TWAI_MSG_FLAG_NONE;
+
+  for (int slot = 0; slot < 4; ++slot) {
+    const int id = first_motor_id + slot;
+    const int16_t mv = armed ? command_mv[id] : 0;
+    putInt16LE(msg.data, slot, mv);
+  }
+
+  const esp_err_t err = twai_transmit(&msg, pdMS_TO_TICKS(5));
+  if (err != ESP_OK) {
+    tx_fail_count++;
+    return false;
+  }
+  return true;
+}
+
+static void sendMotorCommands() {
+  sendGroup(0x100, 1);
+  sendGroup(0x200, 5);
+}
+
+static void receiveFeedback() {
+  twai_message_t msg = {};
+  while (twai_receive(&msg, 0) == ESP_OK) {
+    if (msg.extd || msg.data_length_code < 6) continue;
+    if (msg.identifier < 0x101 || msg.identifier > 0x108) continue;
+
+    const int id = static_cast<int>(msg.identifier - 0x100);
+    MotorState &state = motor_state[id];
+    state.raw_angle_mrad = getInt32LE(&msg.data[0]);
+    state.speed_rpm_x10 = getInt16LE(&msg.data[4]);
+    state.last_ms = millis();
+    state.angle_rad = state.raw_angle_mrad / 1000.0f;
+
+    const MotorConfig *cfg = findMotor(id);
+    if (cfg != nullptr) {
+      state.joint_rad = normalizeRad(state.angle_rad - cfg->zero_rad) * motor_sign[id];
+      const float rpm = state.speed_rpm_x10 / 10.0f;
+      state.speed_rad_s = rpm * kTwoPi / 60.0f * motor_sign[id];
+    }
+  }
+}
+
+static bool computeTargetsFromHeight(float height_mm, float target[9]) {
+  if (height_mm < kHeightMinMm || height_mm > kHeightMaxMm) return false;
+
+  float base_upper = 0.0f;
+  float base_lower = 0.0f;
+  float next_upper = 0.0f;
+  float next_lower = 0.0f;
+  if (!kinematics.inverseKinematics(kStandbyXmm, kStandbyYmm, base_upper, base_lower)) return false;
+  if (!kinematics.inverseKinematics(0.0f, -height_mm, next_upper, next_lower)) return false;
+
+  const float upper_delta = normalizeRad(next_upper - base_upper);
+  const float lower_delta = normalizeRad(next_lower - base_lower);
+  if (fabsf(upper_delta) > kJointSoftLimitRad || fabsf(lower_delta) > kJointSoftLimitRad) return false;
+
+  target[1] = upper_delta;
+  target[2] = lower_delta;
+  target[5] = upper_delta;
+  target[6] = lower_delta;
+  return true;
+}
+
+static void updateHeightHold() {
+  if (!height_hold_enabled) return;
+
+  if (!armed) {
+    stopHeightHold("disarmed");
+    return;
+  }
+  if (!direction_confirmed) {
+    stopHeightHold("directions not confirmed");
+    return;
+  }
+  if (!allLegMotorsOnline()) {
+    stopHeightHold("one or more motors offline");
+    return;
+  }
+  if (tx_fail_count != height_hold_start_tx_fail) {
+    stopHeightHold("CAN transmit failed during height hold");
+    return;
+  }
+
+  twai_status_info_t can_status = {};
+  if (twai_get_status_info(&can_status) != ESP_OK ||
+      can_status.state != TWAI_STATE_RUNNING ||
+      can_status.bus_error_count != height_hold_start_bus_error) {
+    stopHeightHold("CAN bus error during height hold");
+    return;
+  }
+
+  const uint32_t now = millis();
+  const float dt = last_hold_update_ms == 0 ? 0.02f : (now - last_hold_update_ms) / 1000.0f;
+  last_hold_update_ms = now;
+  const float step = kTargetRampRadPerSec * dt;
+
+  for (const auto &motor : kMotors) {
+    const int id = motor.id;
+    if (fabsf(motor_state[id].joint_rad) > kJointSoftLimitRad) {
+      stopHeightHold("joint soft limit exceeded");
+      return;
+    }
+
+    const float delta = desired_target[id] - ramped_target[id];
+    if (delta > step) {
+      ramped_target[id] += step;
+    } else if (delta < -step) {
+      ramped_target[id] -= step;
+    } else {
+      ramped_target[id] = desired_target[id];
+    }
+
+    const float err = normalizeRad(ramped_target[id] - motor_state[id].joint_rad);
+    float mv = kHoldKpMvPerRad * err - kHoldKdMvPerRadSec * motor_state[id].speed_rad_s;
+    if (fabsf(err) > kHoldFullPushThresholdRad) {
+      mv = err > 0.0f ? YYT_HOLD_MV_LIMIT : -YYT_HOLD_MV_LIMIT;
+    } else if (fabsf(err) > kHoldStaticBoostThresholdRad) {
+      mv += err > 0.0f ? kHoldStaticBoostMv : -kHoldStaticBoostMv;
+    }
+    command_mv[id] = clampMv(lroundf(mv * motor.drive_sign), YYT_HOLD_MV_LIMIT);
+  }
+}
+
+static void printHelp() {
+  Serial.println();
+  Serial.println("ParallelLegRobot CAN leg controller");
+  Serial.println("commands:");
+  Serial.println("  help                  show this menu");
+  Serial.println("  status                print raw and zeroed joint angles");
+  Serial.println("  can                   print ESP32 TWAI/CAN controller status");
+  Serial.println("  imu                   print MPU6050 pitch/roll/yaw once");
+  Serial.println("  imustream <on|off>    stream imu:pitch,roll,yaw for PioPulse/plotters");
+  Serial.println("  dirs                  print direction-test checklist and current q");
+  Serial.println("  arm                   allow CAN voltage output, still sends 0 mV first");
+  Serial.println("  disarm                stop all output and leave safe mode");
+  Serial.println("  stop                  set all commands to 0 mV");
+  Serial.println("  test <id> <mv> <ms>   pulse one motor, example: test 1 80 100");
+  Serial.println("  v <id> <mv>           manually set one motor voltage while armed");
+  Serial.println("  sign <id> <1|-1>      set runtime joint direction, example: sign 2 -1");
+  Serial.println("  invert <id>           flip one runtime joint direction");
+  Serial.println("  confirm_dirs          unlock height hold after manual direction check");
+  Serial.println("  height <mm>           slow hold, allowed range 80..120, example: height 100");
+  Serial.println("  stand                 relative mirrored leg pose from current q, then hold");
+  Serial.println("  holdoff               disable height hold, keep armed state");
+  Serial.println();
+}
+
+static void printCanStatus() {
+  twai_status_info_t info = {};
+  const esp_err_t err = twai_get_status_info(&info);
+  if (err != ESP_OK) {
+    Serial.printf("CAN status unavailable: %d\n", err);
+    return;
+  }
+
+  Serial.printf("CAN state=%s tx_fail=%lu bus_error=%lu tx_err=%lu rx_err=%lu tx_queue=%lu rx_queue=%lu rx_missed=%lu rx_overrun=%lu arb_lost=%lu\n",
+                twaiStateName(info.state),
+                static_cast<unsigned long>(tx_fail_count),
+                static_cast<unsigned long>(info.bus_error_count),
+                static_cast<unsigned long>(info.tx_error_counter),
+                static_cast<unsigned long>(info.rx_error_counter),
+                static_cast<unsigned long>(info.msgs_to_tx),
+                static_cast<unsigned long>(info.msgs_to_rx),
+                static_cast<unsigned long>(info.rx_missed_count),
+                static_cast<unsigned long>(info.rx_overrun_count),
+                static_cast<unsigned long>(info.arb_lost_count));
+}
+
+static void printStatus() {
+  Serial.printf("armed=%s dirs=%s hold=%s safe=+/-%d mV hold=+/-%d mV tx_fail=%lu CAN_RX=GPIO%d CAN_TX=GPIO%d\n",
+                armed ? "yes" : "no",
+                direction_confirmed ? "confirmed" : "no",
+                height_hold_enabled ? "on" : "off",
+                YYT_SAFE_MV_LIMIT,
+                YYT_HOLD_MV_LIMIT,
+                static_cast<unsigned long>(tx_fail_count),
+                YYT_CAN_RX_PIN,
+                YYT_CAN_TX_PIN);
+
+  const uint32_t now = millis();
+  for (const auto &motor : kMotors) {
+    const int id = motor.id;
+    const bool online = isMotorOnline(id);
+    const uint32_t age = motor_state[id].last_ms == 0 ? 999999UL : now - motor_state[id].last_ms;
+    Serial.printf("  ID%d %-18s %s sign=%+d tested=%s age=%lu ms raw=%.3f rad q=%+.3f rad spd=%+.2f rad/s target=%+.3f cmd=%+d mV\n",
+                  id,
+                  motor.name,
+                  online ? "online " : "offline",
+                  motor_sign[id],
+                  direction_tested[id] ? "yes" : "no",
+                  static_cast<unsigned long>(age),
+                  motor_state[id].angle_rad,
+                  motor_state[id].joint_rad,
+                  motor_state[id].speed_rad_s,
+                  ramped_target[id],
+                  command_mv[id]);
+  }
+  Serial.printf("  IMU %s stream=%s pitch=%+.2f roll=%+.2f yaw=%+.2f deg\n",
+                imu.isConnected() ? "online" : "offline",
+                imu_stream_enabled ? "on" : "off",
+                imu.getPitch(),
+                imu.getRoll(),
+                imu.getYaw());
+}
+
+static void printImuStatus() {
+  if (!imu.isConnected()) {
+    Serial.println("IMU offline: MPU6050 not detected on I2C");
+    return;
+  }
+  Serial.printf("IMU pitch=%+.2f roll=%+.2f yaw=%+.2f deg stream=%s\n",
+                imu.getPitch(),
+                imu.getRoll(),
+                imu.getYaw(),
+                imu_stream_enabled ? "on" : "off");
+}
+
+static void printDirectionCheck() {
+  Serial.println("direction check helper:");
+  Serial.println("  1) type: arm");
+  Serial.println("  2) test each joint with: test <id> 80 100");
+  Serial.println("  3) write down dq. Positive mv should move in the expected positive joint direction.");
+  Serial.println("  4) only after all four are correct, type: confirm_dirs");
+  Serial.println("current q:");
+  for (const auto &motor : kMotors) {
+    Serial.printf("  ID%d %-18s sign=%+d tested=%s q=%+.3f rad online=%s\n",
+                  motor.id,
+                  motor.name,
+                  motor_sign[motor.id],
+                  direction_tested[motor.id] ? "yes" : "no",
+                  motor_state[motor.id].joint_rad,
+                  isMotorOnline(motor.id) ? "yes" : "no");
+  }
+}
+
+static void runPulseTest(int id, int mv, int duration_ms) {
+  if (findMotor(id) == nullptr) {
+    Serial.println("bad id, use one of: 1 2 5 6");
+    return;
+  }
+  if (!armed) {
+    Serial.println("refused: type arm first");
+    return;
+  }
+
+  duration_ms = constrain(duration_ms, 20, 300);
+  height_hold_enabled = false;
+  clearCommands();
+
+  receiveFeedback();
+  const float before_q = motor_state[id].joint_rad;
+  const bool was_online = isMotorOnline(id);
+
+  command_mv[id] = clampMv(mv);
+  Serial.printf("pulse ID%d at %+d mV for %d ms, then auto stop\n", id, command_mv[id], duration_ms);
+
+  const uint32_t start = millis();
+  while (millis() - start < static_cast<uint32_t>(duration_ms)) {
+    receiveFeedback();
+    sendMotorCommands();
+    delay(10);
+  }
+
+  clearCommands();
+  sendMotorCommands();
+
+  const uint32_t settle_start = millis();
+  while (millis() - settle_start < 120) {
+    receiveFeedback();
+    delay(10);
+  }
+
+  const float after_q = motor_state[id].joint_rad;
+  const float dq = normalizeRad(after_q - before_q);
+  direction_tested[id] = was_online && isMotorOnline(id);
+  direction_confirmed = false;
+  Serial.printf("pulse done, all commands back to 0 mV. ID%d q_before=%+.4f q_after=%+.4f dq=%+.4f rad online_before=%s online_now=%s\n",
+                id,
+                before_q,
+                after_q,
+                dq,
+                was_online ? "yes" : "no",
+                isMotorOnline(id) ? "yes" : "no");
+}
+
+static void handleCommand(String line) {
+  line.trim();
+  if (line.length() == 0) return;
+
+  if (line.equalsIgnoreCase("help")) {
+    printHelp();
+    return;
+  }
+  if (line.equalsIgnoreCase("status")) {
+    printStatus();
+    return;
+  }
+  if (line.equalsIgnoreCase("can")) {
+    printCanStatus();
+    return;
+  }
+  if (line.equalsIgnoreCase("imu")) {
+    printImuStatus();
+    return;
+  }
+  if (line.equalsIgnoreCase("imustream on")) {
+    imu_stream_enabled = true;
+    Serial.println("IMU stream enabled");
+    return;
+  }
+  if (line.equalsIgnoreCase("imustream off")) {
+    imu_stream_enabled = false;
+    Serial.println("IMU stream disabled");
+    return;
+  }
+  if (line.equalsIgnoreCase("balance")) {
+    Serial.println("balance is intentionally disabled in safe bring-up firmware; use imu/imustream first");
+    return;
+  }
+  if (line.equalsIgnoreCase("dirs")) {
+    printDirectionCheck();
+    return;
+  }
+  if (line.equalsIgnoreCase("arm")) {
+    clearCommands();
+    armed = true;
+    Serial.println("armed: output is enabled, current commands are still 0 mV");
+    return;
+  }
+  if (line.equalsIgnoreCase("disarm")) {
+    height_hold_enabled = false;
+    clearCommands();
+    armed = false;
+    sendMotorCommands();
+    Serial.println("disarmed: all outputs forced to 0 mV");
+    return;
+  }
+  if (line.equalsIgnoreCase("stop")) {
+    height_hold_enabled = false;
+    clearCommands();
+    sendMotorCommands();
+    Serial.println("stopped: all commands set to 0 mV");
+    return;
+  }
+  if (line.equalsIgnoreCase("confirm_dirs")) {
+    if (!allDirectionsTested()) {
+      Serial.println("refused: test ID1, ID2, ID5, and ID6 before confirm_dirs");
+      printDirectionCheck();
+      return;
+    }
+    if (!allLegMotorsOnline()) {
+      Serial.println("refused: not all four leg motors are online");
+      return;
+    }
+    direction_confirmed = true;
+    Serial.println("direction check confirmed: height hold is now allowed");
+    return;
+  }
+  if (line.equalsIgnoreCase("holdoff")) {
+    stopHeightHold("user command");
+    return;
+  }
+
+  int id = 0;
+  int mv = 0;
+  int ms = 100;
+  int sign = 0;
+  if (sscanf(line.c_str(), "test %d %d %d", &id, &mv, &ms) >= 2) {
+    runPulseTest(id, mv, ms);
+    return;
+  }
+
+  if (sscanf(line.c_str(), "sign %d %d", &id, &sign) == 2) {
+    if (findMotor(id) == nullptr) {
+      Serial.println("bad id, use one of: 1 2 5 6");
+      return;
+    }
+    if (sign != 1 && sign != -1) {
+      Serial.println("bad sign, use 1 or -1");
+      return;
+    }
+    height_hold_enabled = false;
+    direction_confirmed = false;
+    motor_sign[id] = sign;
+    direction_tested[id] = false;
+    receiveFeedback();
+    Serial.printf("ID%d runtime sign set to %+d. Re-test this joint before confirm_dirs.\n", id, motor_sign[id]);
+    return;
+  }
+
+  if (sscanf(line.c_str(), "invert %d", &id) == 1) {
+    if (findMotor(id) == nullptr) {
+      Serial.println("bad id, use one of: 1 2 5 6");
+      return;
+    }
+    height_hold_enabled = false;
+    direction_confirmed = false;
+    motor_sign[id] = -motor_sign[id];
+    direction_tested[id] = false;
+    receiveFeedback();
+    Serial.printf("ID%d runtime sign inverted to %+d. Re-test this joint before confirm_dirs.\n", id, motor_sign[id]);
+    return;
+  }
+
+  if (sscanf(line.c_str(), "v %d %d", &id, &mv) == 2) {
+    if (findMotor(id) == nullptr) {
+      Serial.println("bad id, use one of: 1 2 5 6");
+      return;
+    }
+    if (!armed) {
+      Serial.println("refused: type arm first");
+      return;
+    }
+    height_hold_enabled = false;
+    command_mv[id] = clampMv(mv);
+    Serial.printf("ID%d command set to %+d mV\n", id, command_mv[id]);
+    return;
+  }
+
+  float height_mm = 0.0f;
+  if (line == "stand") {
+    if (!armed) {
+      Serial.println("refused: type arm first");
+      return;
+    }
+    if (!direction_confirmed) {
+      Serial.println("refused: run single-joint tests, then type confirm_dirs");
+      return;
+    }
+    if (!allLegMotorsOnline()) {
+      Serial.println("refused: not all four leg motors are online");
+      return;
+    }
+
+    desired_target[1] = motor_state[1].joint_rad - kStandRelativeStepRad;
+    desired_target[2] = motor_state[2].joint_rad + kStandRelativeStepRad;
+    desired_target[5] = motor_state[5].joint_rad + kStandRelativeStepRad;
+    desired_target[6] = motor_state[6].joint_rad - kStandRelativeStepRad;
+    for (const auto &motor : kMotors) {
+      if (fabsf(desired_target[motor.id]) > kJointSoftLimitRad) {
+        Serial.println("refused: relative stand target would exceed joint soft limit");
+        return;
+      }
+      ramped_target[motor.id] = motor_state[motor.id].joint_rad;
+    }
+
+    twai_status_info_t can_status = {};
+    if (twai_get_status_info(&can_status) != ESP_OK || can_status.state != TWAI_STATE_RUNNING) {
+      Serial.println("refused: CAN controller is not running");
+      return;
+    }
+    height_hold_start_tx_fail = tx_fail_count;
+    height_hold_start_bus_error = can_status.bus_error_count;
+    height_hold_enabled = true;
+    last_hold_update_ms = millis();
+    Serial.printf("relative stand hold enabled: step %.2f rad from current q\n", kStandRelativeStepRad);
+    return;
+  }
+
+  if (sscanf(line.c_str(), "height %f", &height_mm) == 1) {
+    if (!armed) {
+      Serial.println("refused: type arm first");
+      return;
+    }
+    if (!direction_confirmed) {
+      Serial.println("refused: run single-joint tests, then type confirm_dirs");
+      return;
+    }
+    if (!allLegMotorsOnline()) {
+      Serial.println("refused: not all four leg motors are online");
+      return;
+    }
+    if (!computeTargetsFromHeight(height_mm, desired_target)) {
+      Serial.println("refused: height is outside safe range or IK failed");
+      return;
+    }
+    for (const auto &motor : kMotors) {
+      ramped_target[motor.id] = motor_state[motor.id].joint_rad;
+    }
+    twai_status_info_t can_status = {};
+    if (twai_get_status_info(&can_status) != ESP_OK || can_status.state != TWAI_STATE_RUNNING) {
+      Serial.println("refused: CAN controller is not running");
+      return;
+    }
+    height_hold_start_tx_fail = tx_fail_count;
+    height_hold_start_bus_error = can_status.bus_error_count;
+    height_hold_enabled = true;
+    last_hold_update_ms = millis();
+    Serial.printf("height hold enabled: target %.1f mm, ramping slowly\n", height_mm);
+    return;
+  }
+
+  Serial.println("unknown command, type help");
+}
+
+static bool setupCan() {
+  twai_general_config_t general_config =
+      TWAI_GENERAL_CONFIG_DEFAULT(static_cast<gpio_num_t>(YYT_CAN_TX_PIN),
+                                  static_cast<gpio_num_t>(YYT_CAN_RX_PIN),
+                                  TWAI_MODE_NORMAL);
+  general_config.tx_queue_len = 10;
+  general_config.rx_queue_len = 30;
+
+  twai_timing_config_t timing_config = TWAI_TIMING_CONFIG_1MBITS();
+  twai_filter_config_t filter_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+  esp_err_t err = twai_driver_install(&general_config, &timing_config, &filter_config);
+  if (err != ESP_OK) {
+    Serial.printf("twai_driver_install failed: %d\n", err);
+    return false;
+  }
+
+  err = twai_start();
+  if (err != ESP_OK) {
+    Serial.printf("twai_start failed: %d\n", err);
+    return false;
+  }
+
+  return true;
+}
 
 void setup() {
-    // 1. 初始化调试串口
-    Serial.begin(115200);
-    delay(1000);
-    Serial.println("\n==============================================");
-    Serial.println("ESP32-C3 Wheel-Leg CAN Controller Init...");
-    Serial.println("==============================================");
+  pinMode(kLedPin, OUTPUT);
+  digitalWrite(kLedPin, LOW);
 
-    // 2. 初始化 IMU
-    imu.begin();
+  Serial.begin(115200);
+  delay(1200);
 
-    // 3. 初始化 TWAI (CAN) 驱动
-    initTwai();
+  Serial.println();
+  Serial.println("ParallelLegRobot safe CAN leg controller");
+  Serial.println("reference: foc-wheel-legged-robot control layering, adapted for 4 airborne leg motors");
+  Serial.printf("CAN RX GPIO%d, CAN TX GPIO%d, 1 Mbps\n", YYT_CAN_RX_PIN, YYT_CAN_TX_PIN);
+  Serial.println("boot policy: disarmed, zero voltage output only");
 
-    // 4. 初始化所有电机的位置闭环 PID 控制器
-    // 输入误差以 rad 为单位，输出为 millivolts (mV)，最大幅值为 3000mV (3.0V)
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-        motorPids[i].init(6000.0f, 50.0f, 150.0f, 3000.0f);
+  for (const auto &motor : kMotors) {
+    motor_sign[motor.id] = motor.sign;
+  }
+
+  clearCommands();
+  if (setupCan()) {
+    Serial.println("CAN started");
+  } else {
+    Serial.println("CAN start failed; check ESP32C3 pins and transceiver wiring");
+  }
+
+  if (!imu.begin()) {
+    Serial.println("IMU init skipped/failed; motor CAN bring-up can still continue");
+  }
+
+  if (computeTargetsFromHeight(100.0f, desired_target)) {
+    for (const auto &motor : kMotors) {
+      ramped_target[motor.id] = desired_target[motor.id];
     }
-    Serial.println("All motor PID controllers initialized.");
-
-    // 5. 初始化板载 LED
-    pinMode(LED_PIN, OUTPUT);
-
-    // 初始位置
-    moveToPosition(0, -100);
-    Serial.println("Robot initialized to standby position (0, -100)");
-
-    // 打印菜单
-    Serial.println("\n可用的控制指令:");
-    Serial.println("  'standby'     - 保持在中位 (0, -100)");
-    Serial.println("  'balance'     - 开启 IMU 自平衡反馈");
-    Serial.println("  'X Y'         - 手动坐标控制 (例如: '10 -90' 或 '-5 -110')");
-    Serial.println("==============================================");
+  }
+  printHelp();
 }
 
 void loop() {
-    // 1. 接收所有来自 CAN 总线的电机反馈帧
-    receiveCanMessages();
+  receiveFeedback();
+  imu.update();
 
-    // 2. 更新 IMU 数据
-    imu.update();
-
-    // 3. 处理串口输入
-    processSerialInput();
-
-    // 4. 根据模式执行轨迹，计算足端逆运动学并更新 targetAngles
-    executeTrajectory();
-
-    // 5. 运行 PID 控制器计算输出并通过 CAN 发送电压指令
-    sendCanCommands();
-
-    // 6. 发送 IMU 数据到 PioPulse (FireWater 协议)
-    if (imu.isConnected()) {
-        Serial.printf("imu:%.2f,%.2f,%.2f,0.0,0.0,0.0\n", 
-                      imu.getPitch(), imu.getRoll(), imu.getYaw());
+  while (Serial.available() > 0) {
+    const char c = static_cast<char>(Serial.read());
+    if (c == '\n' || c == '\r') {
+      handleCommand(serial_line);
+      serial_line = "";
+    } else if (serial_line.length() < 120) {
+      serial_line += c;
     }
+  }
 
-    // 7. 更新板载 LED 呼吸灯
-    updateBreathingLed();
+  const uint32_t now = millis();
+  if (now - last_command_ms >= kCommandPeriodMs) {
+    last_command_ms = now;
+    updateHeightHold();
+    sendMotorCommands();
+    digitalWrite(kLedPin, armed ? ((now / 150) & 1) : ((now / 1000) & 1));
+  }
 
-    // 8. 延时控制更新频率 (约 50Hz, 20ms)
-    delay(20);
-}
+  if (imu_stream_enabled && imu.isConnected() && now - last_imu_stream_ms >= kImuStreamPeriodMs) {
+    last_imu_stream_ms = now;
+    Serial.printf("imu:%.2f,%.2f,%.2f,0.0,0.0,0.0\n",
+                  imu.getPitch(),
+                  imu.getRoll(),
+                  imu.getYaw());
+  }
 
-// 初始化 TWAI (CAN) 驱动器，引脚为 TX=GPIO6, RX=GPIO7，波特率为 1 Mbps
-void initTwai() {
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_6, GPIO_NUM_7, TWAI_MODE_NORMAL);
-    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS(); // 1 Mbps
-    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-
-    if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-        if (twai_start() == ESP_OK) {
-            Serial.println("TWAI (CAN) driver started successfully at 1 Mbps.");
-        } else {
-            Serial.println("Failed to start TWAI driver.");
-        }
-    } else {
-        Serial.println("Failed to install TWAI driver.");
-    }
-}
-
-// 接收 CAN 总线的电机角度/速度反馈
-void receiveCanMessages() {
-    twai_message_t message;
-    // 循环读取接收缓冲区中所有的消息
-    while (twai_receive(&message, 0) == ESP_OK) {
-        if (!(message.rtr) && message.identifier >= 0x101 && message.identifier <= 0x108) {
-            int driveId = message.identifier - 0x100;
-            int idx = getMotorIndex(driveId);
-            if (idx != -1 && message.data_length_code == 8) {
-                // 解析反馈帧：
-                // bytes 0..3: int32_t angle_mrad (小端序)
-                // bytes 4..5: int16_t speed_rpm_x10 (小端序)
-                int32_t angle_mrad = (int32_t)(message.data[0] | 
-                                              (message.data[1] << 8) | 
-                                              (message.data[2] << 16) | 
-                                              (message.data[3] << 24));
-                int16_t speed_rpm_x10 = (int16_t)(message.data[4] | 
-                                                 (message.data[5] << 8));
-                
-                currentAngles[idx] = (float)angle_mrad / 1000.0f; // 转换为弧度
-                
-                // 将 speed_rpm_x10 转换为 rad/s
-                float speed_rpm = (float)speed_rpm_x10 / 10.0f;
-                currentVelocities[idx] = speed_rpm * 0.104719755f;
-                
-                motorFeedbackReceived[idx] = true;
-                lastFeedbackTime[idx] = millis();
-            }
-        }
-    }
-}
-
-// 计算 PID 输出，打包并发送 CAN 控制帧 (0x100 和 0x200)
-void sendCanCommands() {
-    static unsigned long lastSendTime = 0;
-    unsigned long now = millis();
-    float dt = (float)(now - lastSendTime) * 0.001f;
-    if (dt <= 0.0f) dt = 0.02f; // 避免除零
-    lastSendTime = now;
-
-    int16_t left_mv[4] = {0, 0, 0, 0};
-    int16_t right_mv[4] = {0, 0, 0, 0};
-
-    // 为每个电机运行位置 PID 控制
-    for (int i = 0; i < MOTOR_COUNT; i++) {
-        // 安全检查：如果从未收到反馈或者超时（500ms无响应），则输出 0 mV 保证安全
-        if (!motorFeedbackReceived[i] || (now - lastFeedbackTime[i] > 500)) {
-            if (i < 3) {
-                left_mv[i] = 0;
-            } else {
-                right_mv[i - 3] = 0;
-            }
-            continue;
-        }
-
-        float error = targetAngles[i] - currentAngles[i];
-        float output_mv = motorPids[i].update(error, dt, currentVelocities[i], true);
-
-        if (i < 3) {
-            left_mv[i] = (int16_t)output_mv;
-        } else {
-            right_mv[i - 3] = (int16_t)output_mv;
-        }
-    }
-
-    // 组装并发送左腿控制帧 (ID: 0x100)
-    twai_message_t left_msg;
-    left_msg.identifier = 0x100;
-    left_msg.extd = 0;
-    left_msg.rtr = 0;
-    left_msg.data_length_code = 8;
-    for (int i = 0; i < 4; i++) {
-        left_msg.data[i * 2] = (uint8_t)(left_mv[i] & 0xFF);
-        left_msg.data[i * 2 + 1] = (uint8_t)((left_mv[i] >> 8) & 0xFF);
-    }
-    twai_transmit(&left_msg, pdMS_TO_TICKS(5));
-
-    // 组装并发送右腿控制帧 (ID: 0x200)
-    twai_message_t right_msg;
-    right_msg.identifier = 0x200;
-    right_msg.extd = 0;
-    right_msg.rtr = 0;
-    right_msg.data_length_code = 8;
-    for (int i = 0; i < 4; i++) {
-        right_msg.data[i * 2] = (uint8_t)(right_mv[i] & 0xFF);
-        right_msg.data[i * 2 + 1] = (uint8_t)((right_mv[i] >> 8) & 0xFF);
-    }
-    twai_transmit(&right_msg, pdMS_TO_TICKS(5));
-}
-
-// 设定目标电机角度 (只是更新 targetAngles 数组，发送由 sendCanCommands 统一周期性进行)
-void setMotorPosition(int motorIndex, float rad) {
-    if (motorIndex < 0 || motorIndex >= MOTOR_COUNT) return;
-    targetAngles[motorIndex] = rad;
-}
-
-// 驱动双腿足端移动到目标坐标 (x, y) 
-bool moveToPosition(float x, float y) {
-    // 限幅检查，防止超出工作空间
-    if (x < LIMIT_X_MIN) x = LIMIT_X_MIN;
-    if (x > LIMIT_X_MAX) x = LIMIT_X_MAX;
-    if (y < LIMIT_Y_MIN) y = LIMIT_Y_MIN;
-    if (y > LIMIT_Y_MAX) y = LIMIT_Y_MAX;
-
-    float left_t1, left_t2;
-    // 逆运动学求解左腿
-    if (kinematics.inverseKinematics(x, y, left_t1, left_t2)) {
-        // 驱动左腿的两个主动轮毂电机 (直接传入弧度)
-        setMotorPosition(MOTOR_L1, left_t1);
-        setMotorPosition(MOTOR_L2, left_t2);
-
-        // 镜像右腿 (X 坐标镜像对称)
-        float right_t1, right_t2;
-        kinematics.inverseKinematics(-x, y, right_t1, right_t2);
-        setMotorPosition(MOTOR_R1, right_t1);
-        setMotorPosition(MOTOR_R2, right_t2);
-
-        // 定时打印状态，包含设定角度与电机反馈角度，方便调试
-        if (millis() - lastPrintTime > 200) {
-            Serial.printf("Target: (%.1f, %.1f) | L Target: (%.2f, %.2f) Act: (%.2f, %.2f) | R Target: (%.2f, %.2f) Act: (%.2f, %.2f)\n", 
-                          x, y, left_t1, left_t2, currentAngles[MOTOR_L1], currentAngles[MOTOR_L2],
-                          right_t1, right_t2, currentAngles[MOTOR_R1], currentAngles[MOTOR_R2]);
-            lastPrintTime = millis();
-        }
-        return true;
-    } else {
-        Serial.printf("Warning: Target (%.1f, %.1f) is unreachable!\n", x, y);
-        return false;
-    }
-}
-
-// 处理串口输入指令
-void processSerialInput() {
-    if (Serial.available() > 0) {
-        String input = Serial.readStringUntil('\n');
-        input.trim();
-
-        if (input.equalsIgnoreCase("standby")) {
-            currentMode = MODE_STANDBY;
-            targetX = 0.0f;
-            targetY = -100.0f;
-            Serial.println("Switching to STANDBY mode.");
-        } else if (input.equalsIgnoreCase("balance")) {
-            if (imu.isConnected()) {
-                currentMode = MODE_BALANCE;
-                Serial.println("Switching to IMU BALANCE feedback mode.");
-            } else {
-                Serial.println("Error: Cannot enable balance mode because IMU is offline.");
-            }
-        } else {
-            // 尝试解析为 X Y 坐标
-            int spaceIndex = input.indexOf(' ');
-            if (spaceIndex != -1) {
-                float rawX = input.substring(0, spaceIndex).toFloat();
-                float rawY = input.substring(spaceIndex + 1).toFloat();
-                
-                if (rawY > 0) {
-                    Serial.println("提示: 机器人在下方工作，Y坐标应为负数 (如 -100)。已自动将其转为负值。");
-                    rawY = -rawY;
-                }
-
-                currentMode = MODE_INTERACTIVE;
-                targetX = rawX;
-                targetY = rawY;
-                Serial.printf("Switching to INTERACTIVE mode. Target: (%.1f, %.1f)\n", targetX, targetY);
-            } else {
-                Serial.println("未知指令。请输入 'standby', 'balance' 或 'X Y'。");
-            }
-        }
-    }
-}
-
-// 根据当前模式计算轨迹位置并移动
-void executeTrajectory() {
-    switch (currentMode) {
-        case MODE_STANDBY:
-            moveToPosition(targetX, targetY);
-            break;
-
-        case MODE_BALANCE: {
-            // IMU 自适应平衡反馈：当机身向前倾斜 (pitch > 0) 时，控制脚掌向前偏移维持中心平衡
-            float kp = -1.2f;
-            float compensatedX = imu.getPitch() * kp;
-            float defaultY = -100.0f;
-            moveToPosition(compensatedX, defaultY);
-            break;
-        }
-
-        case MODE_INTERACTIVE:
-            moveToPosition(targetX, targetY);
-            break;
-    }
-}
-
-// 更新板载 LED 呼吸灯 (使用 sine 曲线实现平滑呼吸效果)
-void updateBreathingLed() {
-    float breathingVal = sin(millis() * 0.003f); // 周期约 2.1s
-    int brightness = (int)(127.5f * (1.0f + breathingVal));
-    analogWrite(LED_PIN, brightness);
+  if (now - last_summary_ms >= kSummaryPeriodMs) {
+    last_summary_ms = now;
+    Serial.printf("online: ID1=%s ID2=%s ID5=%s ID6=%s armed=%s hold=%s\n",
+                  isMotorOnline(1) ? "yes" : "no",
+                  isMotorOnline(2) ? "yes" : "no",
+                  isMotorOnline(5) ? "yes" : "no",
+                  isMotorOnline(6) ? "yes" : "no",
+                  armed ? "yes" : "no",
+                  height_hold_enabled ? "on" : "off");
+  }
 }

@@ -53,7 +53,7 @@ float IQ_set=0;
 float ID_set=0;
 
 float mode=-1;
-float uq_limit=3;
+float uq_limit=6;
 float func_flag=0;
 float PID_output;
 

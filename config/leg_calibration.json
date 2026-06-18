@@ -1,0 +1,51 @@
+{
+  "status": "can_online_zero_offsets_measured_stable",
+  "units": {
+    "zero_offset": "radians",
+    "sign": "dimensionless"
+  },
+  "motors": {
+    "left_front_upper": {
+      "drive_id": 1,
+      "zero_offset": 4.86,
+      "sign": 1
+    },
+    "left_rear_lower": {
+      "drive_id": 2,
+      "zero_offset": 5.553,
+      "sign": 1
+    },
+    "right_front_upper": {
+      "drive_id": 5,
+      "zero_offset": 0.161,
+      "sign": 1
+    },
+    "right_rear_lower": {
+      "drive_id": 6,
+      "zero_offset": 1.991,
+      "sign": 1
+    }
+  },
+  "measurement": {
+    "source": "yyt-can-zero-listen stable repeated capture",
+    "captured_at": "2026-06-18",
+    "can": {
+      "esp32c3_rx_gpio": 7,
+      "esp32c3_tx_gpio": 6,
+      "baud": 1000000,
+      "mode": "listen_only_feedback_capture"
+    },
+    "stable_capture": [
+      "ID1 angle=4.860000 rad, 20/20 repeated samples, range=0.0",
+      "ID2 angle=5.553000 rad, 19/19 repeated samples, range=0.0",
+      "ID5 angle=0.161000 rad, 20/20 repeated samples, range=0.0",
+      "ID6 angle=1.991000 rad, 19/19 repeated samples, range=0.0"
+    ],
+    "note": "Offsets are stable single-turn MT6816 angle readings after fixing YYT CS default levels and forcing both encoder CS lines high before each SPI read."
+  },
+  "standby_pose_definition": {
+    "description": "Symmetric mid-height pose. Wheels/feet under the body, links away from hard stops.",
+    "target_x_mm": 0.0,
+    "target_y_mm": -100.0
+  }
+}

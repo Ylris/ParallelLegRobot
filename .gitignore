@@ -1,8 +1,15 @@
 .pio/
 .vscode/
+.DS_Store
 .mxproject
+YYT_MiniOdrive/
+YYT_MiniOdrive 2/
+foc-wheel-legged-robot/
+node_modules/
+package.json
+package-lock.json
+logs/
 DriveFirmware/build/
-DriveFirmware/firmware_ids/
 DriveFirmware/设计文件/
 DriveFirmware/MDK-ARM/turing_CBU6/
 *.bin
@@ -11,3 +18,7 @@ DriveFirmware/MDK-ARM/turing_CBU6/
 *.map
 *.o
 *.d
+!DriveFirmware/firmware_ids/
+!DriveFirmware/firmware_ids/*.bin
+!DriveFirmware/firmware_ids/*.elf
+!DriveFirmware/firmware_ids/*.hex

@@ -37,18 +37,20 @@ float MT6816_SPI_Get_AngleData(GPIO_TypeDef *CS_PORT, uint16_t CS_PIN) {
     uint16_t data_t[2];
     uint16_t data_r[2];
     
-		float d_angle = 0;
+			float d_angle = 0;
     // 发送的命令
     data_t[0] = (0x80 | 0x03) << 8;
     data_t[1] = (0x80 | 0x04) << 8;
 
-	  for(uint8_t i=0;i<1;i++)
-		{
-			uint8_t h_count=0;
-			// 读取第一组数据
-			HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_RESET); // CS 拉低
-			HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)&data_t[0], (uint8_t *)&data_r[0], 1, HAL_MAX_DELAY);
-			HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_SET);   // CS 拉高
+		  for(uint8_t i=0;i<1;i++)
+			{
+				uint8_t h_count=0;
+				MT6816_CS1_H();
+				MT6816_CS2_H();
+				// 读取第一组数据
+				HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_RESET); // CS 拉低
+				HAL_SPI_TransmitReceive(&hspi1, (uint8_t *)&data_t[0], (uint8_t *)&data_r[0], 1, HAL_MAX_DELAY);
+				HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_SET);   // CS 拉高
 
 			// 读取第二组数据
 			HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_RESET); // CS 拉低

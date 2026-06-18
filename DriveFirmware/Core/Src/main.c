@@ -352,7 +352,7 @@ int main(void)
 	IQ_set=0;
 	ID_set=0;
 	mode=-1;
-	uq_limit=3;
+	uq_limit=6;
 	voltage_power_supply =24;
 #else
 	Motor_init();

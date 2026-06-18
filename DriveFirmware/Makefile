@@ -10,9 +10,10 @@ SZ := $(PREFIX)size
 
 SAFE_START ?= 1
 DRIVE_ID ?= 1
+CAN_FEEDBACK_SINGLE_TURN ?= 0
 
 MCU := -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
-DEFS := -DUSE_HAL_DRIVER -DSTM32G431xx -DYYT_SAFE_START=$(SAFE_START) -DDRIVE_ID=$(DRIVE_ID)
+DEFS := -DUSE_HAL_DRIVER -DSTM32G431xx -DYYT_SAFE_START=$(SAFE_START) -DDRIVE_ID=$(DRIVE_ID) -DCAN_FEEDBACK_SINGLE_TURN=$(CAN_FEEDBACK_SINGLE_TURN)
 
 INCLUDES := \
   -ICore/Inc \
@@ -79,7 +80,7 @@ ASFLAGS := $(MCU) $(DEFS) $(INCLUDES) -g3
 LDSCRIPT := STM32G431CBUx_FLASH.ld
 LDFLAGS := $(MCU) -T$(LDSCRIPT) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections -specs=nano.specs -specs=nosys.specs -lc -lm
 
-.PHONY: all clean flash flash-id erase probe ids
+.PHONY: all clean flash flash-id erase probe ids ids-single-turn
 
 all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
 	$(SZ) $(BUILD_DIR)/$(TARGET).elf
@@ -117,6 +118,18 @@ ids:
 		cp $(BUILD_DIR)/$(TARGET).elf firmware_ids/$(TARGET)_id$$id.elf; \
 		cp $(BUILD_DIR)/$(TARGET).hex firmware_ids/$(TARGET)_id$$id.hex; \
 		cp $(BUILD_DIR)/$(TARGET).bin firmware_ids/$(TARGET)_id$$id.bin; \
+	done
+
+ids-single-turn:
+	@rm -rf firmware_ids_single_turn
+	@mkdir -p firmware_ids_single_turn
+	@for id in 1 2 5 6; do \
+		echo "Building DRIVE_ID=$$id CAN_FEEDBACK_SINGLE_TURN=1"; \
+		$(MAKE) --no-print-directory clean >/dev/null; \
+		$(MAKE) --no-print-directory DRIVE_ID=$$id CAN_FEEDBACK_SINGLE_TURN=1 >/dev/null; \
+		cp $(BUILD_DIR)/$(TARGET).elf firmware_ids_single_turn/$(TARGET)_id$$id.elf; \
+		cp $(BUILD_DIR)/$(TARGET).hex firmware_ids_single_turn/$(TARGET)_id$$id.hex; \
+		cp $(BUILD_DIR)/$(TARGET).bin firmware_ids_single_turn/$(TARGET)_id$$id.bin; \
 	done
 
 probe:

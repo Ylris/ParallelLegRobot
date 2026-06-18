@@ -15,7 +15,7 @@
 #define CAN_FEEDBACK_BASE_ID    0x100U
 #define CAN_COMMAND_TIMEOUT_US  100000U
 #define CAN_FEEDBACK_PERIOD_US  2000U
-#define CAN_MAX_COMMAND_VOLTAGE 3.0f
+#define CAN_MAX_COMMAND_VOLTAGE 6.0f
 
 extern uint32_t Get_Timestamp_us(void);
 
@@ -96,8 +96,13 @@ static void send_feedback(void)
 {
     FDCAN_TxHeaderTypeDef tx_header;
     uint8_t tx_data[8] = {0};
+#if CAN_FEEDBACK_SINGLE_TURN
+    float angle = sensor_direction * MT6816_Get_AngleData();
+    float speed = 0.0f;
+#else
     float angle = sensor_direction * MT6816_Get_FullAngleData();
     float speed = sensor_direction * MT6816_Get_Velocity_L();
+#endif
     int32_t angle_mrad = (int32_t)(angle * 1000.0f);
     int16_t speed_rpm_x10 = (int16_t)(speed * 60.0f / (2.0f * PI) * 10.0f);
 
@@ -149,8 +154,8 @@ void CAN_Bridge_Run(void)
         return;
     }
 
-    now_us = Get_Timestamp_us();
     poll_rx();
+    now_us = Get_Timestamp_us();
 
     if (mode == 7)
     {
