@@ -16,6 +16,7 @@ bool ImuManager::begin() {
     // 初始化 I2C，使用在 LegConfig.h 中配置的引脚
     Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN);
     Wire.setClock(I2C_BUS_HZ);
+    Wire.setTimeOut(20);
 
     // 检查 MPU6050 是否在线
     Wire.beginTransmission(MPU6050_ADDR);

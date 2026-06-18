@@ -21,6 +21,33 @@ All I2C devices share SDA/SCL/GND. They must have different 7-bit addresses.
 
 The current firmware keeps all wheel outputs disabled at boot. Type `wheelarm` before sending PWM.
 
+## STM32F103 Wiring
+
+The F103 minimum board firmware in `src/f103_wheel_pwm.cpp` uses these pins:
+
+| Signal | STM32F103 pin | Connect to |
+| --- | --- | --- |
+| I2C1 SCL | `PB6` | ESP32-C3 `GPIO3` / shared I2C SCL |
+| I2C1 SDA | `PB7` | ESP32-C3 `GPIO4` / shared I2C SDA |
+| GND | `GND` | ESP32-C3 GND, encoder GND, SimpleFOC GND |
+| 3.3 V | `3V3` | 3.3 V logic supply |
+| Left wheel PWM | `PA0` | Left SimpleFOC PWM/speed input |
+| Right wheel PWM | `PA1` | Right SimpleFOC PWM/speed input |
+| Left wheel DIR | `PA2` | Left SimpleFOC direction input, if used |
+| Right wheel DIR | `PA3` | Right SimpleFOC direction input, if used |
+| Status LED | `PC13` | On-board LED on many BluePill boards |
+
+ST-Link programming wires:
+
+| ST-Link | STM32F103 minimum board |
+| --- | --- |
+| `GND` | `GND` |
+| `3.3V` / `VTref` | `3V3` |
+| `SWDIO` / `DIO` | `PA13` / `SWDIO` |
+| `SWCLK` / `CLK` | `PA14` / `SWCLK` |
+
+Do not connect 5 V to ESP32-C3 GPIO, F103 GPIO, or I2C pull-ups. The shared I2C bus should be pulled up to 3.3 V.
+
 ## STM32F103 PWM Coprocessor Protocol
 
 ESP32-C3 is I2C master. STM32F103 is I2C slave at address `0x12`.

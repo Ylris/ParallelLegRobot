@@ -891,7 +891,8 @@ void setup() {
 
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(I2C_BUS_HZ);
-  scanI2cBus();
+  Wire.setTimeOut(20);
+  Serial.println("I2C started. Type i2cscan to scan devices.");
 
   if (!imu.begin()) {
     Serial.println("IMU init skipped/failed; motor CAN bring-up can still continue");
