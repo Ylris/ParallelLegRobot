@@ -250,28 +250,32 @@ YYT CAN 固件的行为：
 
 #### 轮电机 SimpleFOC 驱动器
 
-轮电机当前不是 YYT CAN 链路的一部分。轮电机执行链路是：
+轮电机采用两块 3-PWM 接口的 SimpleFOC 无刷电机驱动板。其执行链路是：
 
 ```text
 ESP32-C3 主控
   -> I2C 总线 GPIO3(SCL) / GPIO4(SDA)
-  -> STM32F103C8T6 轮电机 PWM 协处理器, I2C 地址 0x12
-  -> PWM/方向信号
-  -> 两块 SimpleFOC 轮电机驱动板
-  -> 左右轮电机
+  -> STM32F103C8T6 轮电机 6-PWM 协处理器, I2C 地址 0x12
+  -> 6路三相PWM + 2路使能信号
+  -> 两块 SimpleFOC 轮电机驱动板 (3-PWM 模式)
+  -> 左右无刷轮电机
 ```
 
-STM32F103C8T6 到 SimpleFOC 的当前固件引脚：
+STM32F103C8T6 到 SimpleFOC 的 6-PWM 引脚分配定义：
 
-| F103 引脚 | 接到 SimpleFOC | 作用 |
-| :--- | :--- | :--- |
-| `PA0` | 左轮 SimpleFOC PWM 输入 | 左轮速度/占空比命令 |
-| `PA2` | 左轮 SimpleFOC 方向输入 | 左轮方向 |
-| `PA1` | 右轮 SimpleFOC PWM 输入 | 右轮速度/占空比命令 |
-| `PA3` | 右轮 SimpleFOC 方向输入 | 右轮方向 |
-| `PB6` | ESP32 I2C `SCL` 总线 | F103 作为 I2C 从机 |
-| `PB7` | ESP32 I2C `SDA` 总线 | F103 作为 I2C 从机 |
-| `GND` | ESP32 GND / SimpleFOC GND | 必须共地 |
+| F103 引脚 | 定时器通道 | 接到 SimpleFOC | 作用 |
+| :--- | :--- | :--- | :--- |
+| `PA0` | TIM2_CH1 | 左轮 SimpleFOC `IN1` | 左轮 U 相驱动输入 |
+| `PA1` | TIM2_CH2 | 左轮 SimpleFOC `IN2` | 左轮 V 相驱动输入 |
+| `PA2` | TIM2_CH3 | 左轮 SimpleFOC `IN3` | 左轮 W 相驱动输入 |
+| `PA4` | GPIO Out | 左轮 SimpleFOC `EN` | 左轮使能控制信号 |
+| `PA8` | TIM1_CH1 | 右轮 SimpleFOC `IN1` | 右轮 U 相驱动输入 |
+| `PA9` | TIM1_CH2 | 右轮 SimpleFOC `IN2` | 右轮 V 相驱动输入 |
+| `PA10`| TIM1_CH3 | 右轮 SimpleFOC `IN3` | 右轮 W 相驱动输入 |
+| `PA5` | GPIO Out | 右轮 SimpleFOC `EN` | 右轮使能控制信号 |
+| `PB6` | I2C1_SCL | ESP32 I2C `SCL` 总线 | F103 作为 I2C 从机 |
+| `PB7` | I2C1_SDA | ESP32 I2C `SDA` 总线 | F103 作为 I2C 从机 |
+| `GND` | - | ESP32 GND / SimpleFOC GND | 必须共地 |
 
 轮磁编码器也挂在同一条 ESP32 I2C 总线上：
 
