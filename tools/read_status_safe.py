@@ -5,7 +5,7 @@ import time
 import sys
 import glob
 
-SAFE_COMMANDS = ("status", "can", "dirs", "stop", "holdoff", "disarm", "zero6")
+SAFE_COMMANDS = ("status", "can", "cantx", "dirs", "stop", "holdoff", "disarm", "zero6", "holdhere")
 
 def choose_port() -> str:
     ports = sorted(glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*"))
@@ -25,15 +25,21 @@ def main():
     port = args.port or choose_port()
     print(f"Connecting safely to: {port}")
     try:
-        # Open serial with control lines disabled
-        ser = serial.Serial(port, 115200, timeout=0.2)
+        # On this ESP32-C3 board, DTR=False can hold GPIO9/BOOT low and
+        # leave the chip in ROM download mode. Keep BOOT released.
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = 115200
+        ser.timeout = 0.2
+        ser.dtr = True
+        ser.rts = False
+        ser.open()
     except Exception as e:
         print(f"Error: {e}")
         return 1
 
-    # Keep DTR and RTS low to prevent resets
-    ser.dtr = False
-    ser.rts = False
+    ser.setDTR(True)
+    ser.setRTS(False)
     time.sleep(args.pre_command_delay)
     
     # Clear buffer and query the requested whitelisted command.
@@ -47,9 +53,8 @@ def main():
         if line:
             print(line.decode('utf-8', errors='replace').strip())
             
-    # Explicitly ensure control lines are low before closing
-    ser.dtr = False
-    ser.rts = False
+    ser.setDTR(True)
+    ser.setRTS(False)
     ser.close()
     return 0
 
