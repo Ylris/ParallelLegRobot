@@ -15,7 +15,7 @@ try:
 except ImportError as exc:
     raise SystemExit("pyserial is required: python3 -m pip install pyserial") from exc
 
-from serial_log import TeeLogger, default_log_path
+from serial_log import TeeLogger, default_log_path, wait_for_controller_ready
 
 
 PULSE_RE = re.compile(r"ID(?P<id>\d+).*dq=(?P<dq>[+-]?\d+\.\d+)")
@@ -76,10 +76,18 @@ def main() -> int:
 
     dq_by_id: dict[int, float] = {}
     try:
-        with serial.Serial(port, args.baud, timeout=0.25) as ser:
-            ser.setDTR(True)
-            ser.setRTS(False)
-            time.sleep(2.0)
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = args.baud
+        ser.timeout = 0.25
+        ser.dtr = True
+        ser.rts = False
+        ser.open()
+        try:
+            ser.dtr = True
+            ser.rts = False
+            if not wait_for_controller_ready(ser, logger=logger):
+                logger.print("warning: controller ready marker not seen before commands")
 
             send_and_read(ser, "can", 0.8, logger)
             send_and_read(ser, "status", 1.2, logger)
@@ -103,6 +111,10 @@ def main() -> int:
 
             send_and_read(ser, "dirs", 1.2, logger)
             send_and_read(ser, "status", 1.2, logger)
+        finally:
+            ser.dtr = True
+            ser.rts = False
+            ser.close()
 
         logger.print("\nSummary:")
         for motor_id in (1, 2, 5, 6):

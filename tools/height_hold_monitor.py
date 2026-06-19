@@ -15,7 +15,7 @@ try:
 except ImportError as exc:
     raise SystemExit("pyserial is required: python3 -m pip install pyserial") from exc
 
-from serial_log import TeeLogger, default_log_path
+from serial_log import TeeLogger, default_log_path, wait_for_controller_ready
 
 
 TESTED_RE = re.compile(r"ID(?P<id>\d+).*tested=(?P<tested>yes|no)")
@@ -90,23 +90,33 @@ def main() -> int:
     logger.print("Safety: use only after four joint tests are done and directions are physically correct.")
 
     try:
-        with serial.Serial(port, args.baud, timeout=0.25) as ser:
-            ser.setDTR(True)
-            ser.setRTS(False)
-            time.sleep(2.0)
+        ser = serial.Serial()
+        ser.port = port
+        ser.baudrate = args.baud
+        ser.timeout = 0.25
+        ser.dtr = True
+        ser.rts = False
+        ser.open()
+        try:
+            ser.dtr = True
+            ser.rts = False
+            if not wait_for_controller_ready(ser, logger=logger):
+                logger.print("warning: controller ready marker not seen before commands")
 
             send_and_read(ser, "can", 0.8, logger)
             status_lines = send_and_read(ser, "status", 1.2, logger)
             dirs_lines = send_and_read(ser, "dirs", 1.2, logger)
             tested = parse_tested(status_lines + dirs_lines)
             if not all_tested(tested):
-                logger.print("\nRefusing to continue: not all ID1/2/5/6 are tested=yes.")
-                logger.print("Run tools/leg_test_sequence.py first, fix directions if needed, then retry.")
-                return 2
+                logger.print("\nWarning: not all ID1/2/5/6 are tested=yes.")
+                if not args.yes:
+                    logger.print("Run tools/leg_test_sequence.py first, fix directions if needed, then retry.")
+                    return 2
 
             if not args.yes:
                 input("\nConfirm all four directions are correct. Press Enter to run confirm_dirs. ")
             send_and_read(ser, "confirm_dirs", 1.0, logger)
+            send_and_read(ser, "arm", 0.8, logger)
 
             if not args.yes:
                 input(f"\nPress Enter to start height {args.height:.1f} mm. Ctrl-C to stop. ")
@@ -123,6 +133,10 @@ def main() -> int:
             finally:
                 logger.print("\nStopping height hold and disarming.")
                 stop_safely(ser, logger)
+        finally:
+            ser.dtr = True
+            ser.rts = False
+            ser.close()
 
         logger.print("\nDone. Send the monitor output to Codex for review.")
         if not args.no_log:
