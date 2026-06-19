@@ -1,5 +1,9 @@
 #include "FOC.h"
 
+#ifndef FOC_MODULATION_LIMIT
+#define FOC_MODULATION_LIMIT 0.577f
+#endif
+
 
 // 归一化角度到 [0,2PI]
 float _normalizeAngle(float angle){
@@ -17,9 +21,16 @@ float _electricalAngle(){
   	return  _normalizeAngle((float)(sensor_direction * pole_pairs) * MT6816_Get_AngleData() -zero_electric_angle);
 }
 
+static float clamp_unit(float value)
+{
+	if (value < 0.0f) return 0.0f;
+	if (value > 1.0f) return 1.0f;
+	return value;
+}
+
 void clarke_transform()
 {
-		Ialpha = ia;
+	Ialpha = ia;
 		Ibeta  = (ib - ic) * ONE_BY_SQRT3;
 }
 
@@ -48,13 +59,18 @@ void setPhaseVoltage(float Uq, float Ud, float angle_el)
 	}
 	else
 	{// only Uq available - no need for atan2 and sqrt
+		if (Uq < 0.0f)
+		{
+			Uq = -Uq;
+			angle_el = _normalizeAngle(angle_el + PI);
+		}
 		Uout = Uq / voltage_power_supply;
 		// angle normalisation in between 0 and 2pi
 		// only necessary if using _sin and _cos - approximation functions
 		angle_el = _normalizeAngle(angle_el + _PI_2);
 	}
-	if(Uout> 0.577)Uout= 0.577;
-	if(Uout<-0.577)Uout=-0.577;
+	if(Uout> FOC_MODULATION_LIMIT)Uout= FOC_MODULATION_LIMIT;
+	if(Uout<-FOC_MODULATION_LIMIT)Uout=-FOC_MODULATION_LIMIT;
 	
 	sector = (angle_el / _PI_3) + 1;
 	T1 = sqrt(3)*sin(sector*_PI_3 - angle_el) * Uout;
@@ -99,6 +115,9 @@ void setPhaseVoltage(float Uq, float Ud, float angle_el)
 			Tb = 0;
 			Tc = 0;
 	}
+	Ta = clamp_unit(Ta);
+	Tb = clamp_unit(Tb);
+	Tc = clamp_unit(Tc);
 	Set_Pwm(1, Ta*8400);
 	Set_Pwm(2, Tb*8400);
 	Set_Pwm(3, Tc*8400);

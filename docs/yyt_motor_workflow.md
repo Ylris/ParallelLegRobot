@@ -2,6 +2,10 @@
 
 This repository is the source of truth for the robot firmware and motor driver firmware.
 
+For the latest continuation state, read `docs/current_handoff.md` first. That
+file records the current flashed diagnostic firmware, last safe state, and the
+next ST-Link/CAN command-path check.
+
 ## Motor ID map
 
 Physical positions are recorded in the side-view drawing coordinates used during bring-up:
@@ -59,6 +63,101 @@ zero6
 ```
 
 The ESP32-C3 main controller sends `2345 mV` in the ID6 command slot. The ID6 YYT firmware treats that sentinel as a local zero-position hold request, moves toward `DRIVE_ZERO_RAD=1.991`, then holds with its local PI position loop. Use `stop`, `holdoff`, or `disarm` to exit.
+
+Current ID6 field-tested zero-hold build, confirmed usable on 2026-06-19:
+
+```sh
+make -C DriveFirmware id6-zero-hold-current
+make -C DriveFirmware flash-id6-zero-hold-current
+```
+
+That target builds ID6 with `KP=12.0`, `KI=3.2`, `KD=0.0`, `DRIVE_AUTO_ZERO_DEADBAND_RAD=0.02f`, `DRIVE_AUTO_ZERO_HOLD_LIMIT=12.0f`, `DRIVE_AUTO_ZERO_APPROACH_VOLTAGE=12.0f`, and `FOC_MODULATION_LIMIT=1.0f`. The motor still has audible whine at hold, but this version was acceptable in field testing because it did not show the severe shaking seen with the later `KP=8.0` and `DRIVE_AUTO_ZERO_DEADBAND_RAD=0.08f` test build.
+
+Current ID1 FOC voltage-mode experiment, tested on 2026-06-19:
+
+```sh
+make -C DriveFirmware DRIVE_ID=1 \
+  MOTOR_AUTO_ELECTRIC_ZERO=0 \
+  MOTOR_ZERO_ELECTRIC_ANGLE=0.576f \
+  MOTOR_SENSOR_DIRECTION=1.0f \
+  MOTOR_POLE_PAIRS=11.0f \
+  MOTOR_SKIP_BOOT_SWEEP=1 \
+  FOC_MODULATION_LIMIT=1.0f \
+  CAN_MAX_COMMAND_VOLTAGE=12.0f \
+  CAN_SPIN_TEST_VOLTAGE=12.0f \
+  CAN_SPIN_TEST_VELOCITY=0.05f \
+  all
+```
+
+This build includes the FOC negative-`Uq` phase-flip fix in `DriveFirmware/FOC/FOC.c`. It does not auto-hold or sweep on boot. The matching backup is:
+
+```text
+backups/yyt_firmware_20260619_035115/id1_foc_zero_0p576_neg_uq_fix_no_phase_scan/
+```
+
+Important status: this ID1 FOC zero is not yet validated as stable. An initial test appeared to move, but the result did not reproduce after reflashing the same backup. Treat the `0.576f` zero as an experiment, not a confirmed calibration.
+
+Latest reproducible ID1 status:
+
+| Command | Duration | Result |
+| --- | ---: | --- |
+| `test 1 12000 300` | 300 ms | `dq=0.000 rad` after retest |
+| `v 1 4321` | 1000 ms | `dq=0.000 rad` after retest |
+| `v 1 -4321` | 1000 ms | about `dq=-0.010 rad` after retest |
+
+The earlier absolute phase scan result (`7004/7005`) is not currently considered reliable because later A/B testing showed it likely included mechanical settling or rebound. Keep `CAN_PHASE_SCAN_ENABLE=0` for normal builds so `7000..7005 mV` remain ordinary voltage commands.
+
+Current ID5 direct UART debug build, flashed and verified on 2026-06-19:
+
+```sh
+make -C DriveFirmware id5-uart-debug
+make -C DriveFirmware flash-id5-uart-debug
+```
+
+This target builds ID5 with `DRIVE_AUTO_ZERO_HOLD=0`, `YYT_UART_DEBUG=1`, and `FOC_MODULATION_LIMIT=1.0f`. It does not use the ESP32-C3 main controller or CAN for tuning. Connect a USB-TTL adapter directly to the YYT drive UART:
+
+| USB-TTL | YYT drive |
+| --- | --- |
+| RX | PB6 / USART1_TX |
+| TX | PB7 / USART1_RX |
+| GND | GND |
+
+The UART is `115200 8N1`. The debug firmware boots `disarmed`, sends `0 mV`, and requires the `arm` command before any motion. Start with low-voltage pulses:
+
+```text
+status
+arm
+pulse 300 50
+pulse -300 50
+stop
+disarm
+```
+
+For local ID5 hold tuning, use small limits first:
+
+```text
+pid 1000 0 50 800 -1
+hold current
+```
+
+Units are integer-only in the serial protocol: `pulse/v/limit` use mV, `target/hold` use raw single-turn mrad, and `pid` gains use mV/rad. The default hold parameters are `sign=-1`, `Kp=1000 mV/rad`, `Ki=0`, `Kd=50 mV/(rad/s)`, and `limit=800 mV`. Avoid the earlier ID5 drive-side auto-zero builds during debugging; the ID5 versions tested with high-voltage auto-hold shook severely.
+
+ID5 copy of the ID6 field-tested zero-hold parameters, flashed and verified on 2026-06-19:
+
+```sh
+make -C DriveFirmware DRIVE_ID=5 DRIVE_AUTO_ZERO_HOLD=1 \
+  DRIVE_AUTO_ZERO_OUTPUT_SIGN=1 \
+  DRIVE_AUTO_ZERO_HOLD_KP=12.0f \
+  DRIVE_AUTO_ZERO_HOLD_KI=3.2f \
+  DRIVE_AUTO_ZERO_HOLD_KD=0.0f \
+  DRIVE_AUTO_ZERO_HOLD_LIMIT=12.0f \
+  DRIVE_AUTO_ZERO_APPROACH_VOLTAGE=12.0f \
+  DRIVE_AUTO_ZERO_DEADBAND_RAD=0.02f \
+  FOC_MODULATION_LIMIT=1.0f \
+  YYT_UART_DEBUG=0 all
+```
+
+This keeps the board identity as `DRIVE_ID=5` and uses ID5's compiled zero offset `DRIVE_ZERO_RAD=0.161f`; only the ID6 zero-hold behavior and gains are copied. It boots directly into drive-side zero hold with no start delay and no hold timeout.
 
 Recommended standby pose:
 

@@ -1,9 +1,12 @@
 .pio/
+.pycache/
+__pycache__/
 .vscode/
 .DS_Store
 .mxproject
 YYT_MiniOdrive/
 YYT_MiniOdrive 2/
+YYT_MiniOdrive 开源/
 foc-wheel-legged-robot/
 node_modules/
 package.json
@@ -12,6 +15,9 @@ logs/
 DriveFirmware/build/
 DriveFirmware/设计文件/
 DriveFirmware/MDK-ARM/turing_CBU6/
+backups/**/build/
+backups/**/build_*/
+backups/**/MDK-ARM/turing_CBU6/
 *.bin
 *.elf
 *.hex

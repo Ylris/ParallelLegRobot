@@ -8,7 +8,8 @@
 #define ACCEL_XOUT_H 0x3B
 
 ImuManager::ImuManager() 
-    : connected(false), pitch(0.0f), roll(0.0f), yaw(0.0f), lastTime(0),
+    : connected(false), pitch(0.0f), roll(0.0f), yaw(0.0f),
+      gyroXDegS(0.0f), gyroYDegS(0.0f), gyroZDegS(0.0f), lastTime(0),
       gyroXOffset(0.0f), gyroYOffset(0.0f), gyroZOffset(0.0f) {}
 
 bool ImuManager::begin() {
@@ -121,6 +122,9 @@ void ImuManager::update() {
     float gx = ((float)gxRaw - gyroXOffset) / 131.0f;
     float gy = ((float)gyRaw - gyroYOffset) / 131.0f;
     float gz = ((float)gzRaw - gyroZOffset) / 131.0f;
+    gyroXDegS = gx;
+    gyroYDegS = gy;
+    gyroZDegS = gz;
 
     // 计算加速度计姿态角 (单位: 度)
     float accelPitch = atan2(-ax, sqrt(ay * ay + az * az)) * 180.0f / M_PI;

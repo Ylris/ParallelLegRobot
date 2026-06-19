@@ -13,6 +13,9 @@ public:
     float getPitch() const { return pitch; }
     float getRoll() const { return roll; }
     float getYaw() const { return yaw; }
+    float getPitchRateDegS() const { return gyroYDegS; }
+    float getRollRateDegS() const { return gyroXDegS; }
+    float getYawRateDegS() const { return gyroZDegS; }
     bool isConnected() const { return connected; }
 
 private:
@@ -20,6 +23,9 @@ private:
     float pitch;
     float roll;
     float yaw;
+    float gyroXDegS;
+    float gyroYDegS;
+    float gyroZDegS;
     unsigned long lastTime;
 
     // 校准偏移量

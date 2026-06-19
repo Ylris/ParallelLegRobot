@@ -5,7 +5,7 @@ import time
 import sys
 import glob
 
-SAFE_COMMANDS = ("status", "can", "cantx", "dirs", "stop", "holdoff", "disarm", "zero6", "holdhere")
+SAFE_COMMANDS = ("status", "can", "cantx", "dirs", "stop", "holdoff", "disarm", "zero6", "holdhere", "fixedpose")
 
 def choose_port() -> str:
     ports = sorted(glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*"))

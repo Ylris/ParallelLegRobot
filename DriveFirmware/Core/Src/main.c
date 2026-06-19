@@ -34,6 +34,7 @@
 #include "Motor.h"
 #include "Lowpass.h"
 #include "can_bridge.h"
+#include "drive_uart_debug.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -66,6 +67,14 @@ static volatile uint8_t motor_calibration_requested=0;
 
 #ifndef YYT_SAFE_START
 #define YYT_SAFE_START 1
+#endif
+
+#ifndef YYT_DISABLE_OUTPUT
+#define YYT_DISABLE_OUTPUT 0
+#endif
+
+#ifndef YYT_UART_DEBUG
+#define YYT_UART_DEBUG 0
 #endif
 
 /* Private function prototypes -----------------------------------------------*/
@@ -339,7 +348,16 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 	System_Init();
-#if YYT_SAFE_START
+#if YYT_DISABLE_OUTPUT
+	Pos_set=0;
+	Velo_set=0;
+	IQ_set=0;
+	ID_set=0;
+	mode=-1;
+	uq_limit=0;
+	zero_electric_angle_norm=0;
+	HAL_GPIO_WritePin(GPIOA,GPIO_PIN_4,GPIO_PIN_SET);
+#elif YYT_SAFE_START
 	Motor_init();
 	PID_Pos_Set(50,27,0,6);
   PID_Cur_D_Set(7.5,30,0,6);
@@ -347,7 +365,7 @@ int main(void)
 	PID_Vel_Set(5,6.2,0,12);
 	PID_Vel_Cur_Set(0.7,5.7,0,12);
 	PID_Pos_Cur_Set(20,2,0,3);
-	pole_pairs = 11;
+	pole_pairs = MOTOR_POLE_PAIRS;
 	Pos_set=0;
 	Velo_set=0;
 	IQ_set=0;
@@ -355,7 +373,9 @@ int main(void)
 	mode=-1;
 	uq_limit=12;
 	voltage_power_supply =12;
+#if !MOTOR_AUTO_ELECTRIC_ZERO
 	zero_electric_angle=MOTOR_ZERO_ELECTRIC_ANGLE;
+#endif
 	zero_electric_angle_norm=0;
 	HAL_GPIO_WritePin(GPIOA,GPIO_PIN_4,GPIO_PIN_SET);
 #else
@@ -394,6 +414,9 @@ int main(void)
 //	Pos_set=3.14;
 //	IQ_set=3.0;
 #endif
+#if YYT_UART_DEBUG
+	DriveUartDebug_Init(buffer_receive, sizeof(buffer_receive));
+#endif
 	
   while (1)
   {
@@ -411,8 +434,12 @@ int main(void)
 		//VelocityCloseloop(Velo_set);
 		clarke_transform();
 		park_transform(zero_electric_angle_norm);
+		#if YYT_UART_DEBUG
+		DriveUartDebug_Run();
+		#else
 		CAN_Bridge_Run();
 		VOFA_RUN();
+		#endif
 
 		//PositionCloseloop(Pos_set);
     /* USER CODE END WHILE */
@@ -513,6 +540,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		
 		if (htim->Instance == TIM3)
 	 {		 
+			#if !YYT_UART_DEBUG
 			static float data[11];
 		  data[0]=(float)ia;
 			data[1]=(float)ib;
@@ -539,8 +567,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 				HAL_UARTEx_ReceiveToIdle_DMA(&huart1, buffer_receive, sizeof(buffer_receive));
 				HAL_UART_Transmit_DMA(&huart1, buffer_transmit, sizeof(buffer_transmit));
 			}
+		#endif
 		}
-	 
+
 		if (htim->Instance == TIM4)
 		{
 			 overflow_count++;
@@ -558,8 +587,12 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart,uint16_t Size)
 {
 	if(huart==&huart1)
 	{
+#if YYT_UART_DEBUG
+		DriveUartDebug_OnRx(buffer_receive, Size);
+#else
 			static float data_[1];
 		  data_[0]=(float)parseData((char*)buffer_receive);
+#endif
 	}
 }
 
@@ -567,7 +600,11 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart1)
     {
+#if YYT_UART_DEBUG
+        DriveUartDebug_RestartRx();
+#else
         HAL_UARTEx_ReceiveToIdle_DMA(&huart1, buffer_receive, sizeof(buffer_receive));
+#endif
     }
 }
 

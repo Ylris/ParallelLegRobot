@@ -10,6 +10,10 @@
 #define WHEEL_PWM_LIMIT 1000
 #endif
 
+#ifndef WHEEL_SPEED_LIMIT_MRAD_S
+#define WHEEL_SPEED_LIMIT_MRAD_S 12000
+#endif
+
 #ifndef MOTOR_POLE_PAIRS
 #define MOTOR_POLE_PAIRS 11
 #endif
@@ -18,7 +22,24 @@
 #define POWER_SUPPLY_VOLTAGE 12.0f
 #endif
 
+#ifndef WHEEL_VEL_PID_P
+#define WHEEL_VEL_PID_P 0.20f
+#endif
+
+#ifndef WHEEL_VEL_PID_I
+#define WHEEL_VEL_PID_I 2.00f
+#endif
+
+#ifndef WHEEL_VEL_PID_D
+#define WHEEL_VEL_PID_D 0.00f
+#endif
+
+#ifndef WHEEL_VEL_LPF_TF
+#define WHEEL_VEL_LPF_TF 0.02f
+#endif
+
 static constexpr uint8_t kCmdSetPwm = 0x10;
+static constexpr uint8_t kCmdSetVelocity = 0x11;
 static constexpr uint32_t kCommandTimeoutMs = 100;
 
 static constexpr uint8_t kStatusLedPin = PC13;
@@ -46,12 +67,21 @@ static BLDCDriver3PWM driver_right = BLDCDriver3PWM(PA8, PA9, PA10, PA5);
 
 static volatile float target_voltage_left = 0.0f;
 static volatile float target_voltage_right = 0.0f;
+static volatile float target_velocity_left = 0.0f;
+static volatile float target_velocity_right = 0.0f;
 static volatile uint32_t last_command_ms = 0;
 static volatile bool command_seen = false;
+static volatile uint8_t active_command = kCmdSetPwm;
 
 static int16_t clampPwm(int16_t value) {
   if (value > WHEEL_PWM_LIMIT) return WHEEL_PWM_LIMIT;
   if (value < -WHEEL_PWM_LIMIT) return -WHEEL_PWM_LIMIT;
+  return value;
+}
+
+static int16_t clampSpeedMradS(int16_t value) {
+  if (value > WHEEL_SPEED_LIMIT_MRAD_S) return WHEEL_SPEED_LIMIT_MRAD_S;
+  if (value < -WHEEL_SPEED_LIMIT_MRAD_S) return -WHEEL_SPEED_LIMIT_MRAD_S;
   return value;
 }
 
@@ -66,8 +96,10 @@ static void onI2cReceive(int count) {
   const uint8_t cmd = Wire.read();
   count--;
 
-  // Payload: 1-byte command (0x10) + 2-byte left_pwm + 2-byte right_pwm + 2-byte left_encoder_raw + 2-byte right_encoder_raw
-  if (cmd == kCmdSetPwm && count >= 8) {
+  // Payload:
+  // 0x10: 2-byte left PWM + 2-byte right PWM + 2-byte left encoder raw + 2-byte right encoder raw
+  // 0x11: 2-byte left velocity mrad/s + 2-byte right velocity mrad/s + same encoder raw values
+  if ((cmd == kCmdSetPwm || cmd == kCmdSetVelocity) && count >= 8) {
     const uint8_t l0 = Wire.read();
     const uint8_t l1 = Wire.read();
     const uint8_t r0 = Wire.read();
@@ -77,14 +109,24 @@ static void onI2cReceive(int count) {
     const uint8_t re0 = Wire.read();
     const uint8_t re1 = Wire.read();
 
-    int16_t pwm_l = clampPwm(readInt16LE(l0, l1));
-    int16_t pwm_r = clampPwm(readInt16LE(r0, r1));
+    const int16_t left_value = readInt16LE(l0, l1);
+    const int16_t right_value = readInt16LE(r0, r1);
     uint16_t enc_l = static_cast<uint16_t>(le0 | (le1 << 8));
     uint16_t enc_r = static_cast<uint16_t>(re0 | (re1 << 8));
 
-    // Convert PWM (-1000..1000) to target phase voltage
-    target_voltage_left = (float)pwm_l / 1000.0f * POWER_SUPPLY_VOLTAGE;
-    target_voltage_right = (float)pwm_r / 1000.0f * POWER_SUPPLY_VOLTAGE;
+    if (cmd == kCmdSetPwm) {
+      int16_t pwm_l = clampPwm(left_value);
+      int16_t pwm_r = clampPwm(right_value);
+      target_voltage_left = (float)pwm_l / 1000.0f * POWER_SUPPLY_VOLTAGE;
+      target_voltage_right = (float)pwm_r / 1000.0f * POWER_SUPPLY_VOLTAGE;
+      active_command = kCmdSetPwm;
+    } else {
+      int16_t vel_l = clampSpeedMradS(left_value);
+      int16_t vel_r = clampSpeedMradS(right_value);
+      target_velocity_left = (float)vel_l / 1000.0f;
+      target_velocity_right = (float)vel_r / 1000.0f;
+      active_command = kCmdSetVelocity;
+    }
 
     // Convert raw 12-bit angle (0..4095) to radians (0..2pi)
     sensor_left.current_angle = (float)(enc_l & 0x0FFF) * _2PI / 4096.0f;
@@ -126,6 +168,18 @@ void setup() {
   // Set motor control parameters
   motor_left.controller = MotionControlType::torque;
   motor_right.controller = MotionControlType::torque;
+  motor_left.PID_velocity.P = WHEEL_VEL_PID_P;
+  motor_left.PID_velocity.I = WHEEL_VEL_PID_I;
+  motor_left.PID_velocity.D = WHEEL_VEL_PID_D;
+  motor_left.LPF_velocity.Tf = WHEEL_VEL_LPF_TF;
+  motor_left.velocity_limit = (float)WHEEL_SPEED_LIMIT_MRAD_S / 1000.0f;
+  motor_left.voltage_limit = POWER_SUPPLY_VOLTAGE;
+  motor_right.PID_velocity.P = WHEEL_VEL_PID_P;
+  motor_right.PID_velocity.I = WHEEL_VEL_PID_I;
+  motor_right.PID_velocity.D = WHEEL_VEL_PID_D;
+  motor_right.LPF_velocity.Tf = WHEEL_VEL_LPF_TF;
+  motor_right.velocity_limit = (float)WHEEL_SPEED_LIMIT_MRAD_S / 1000.0f;
+  motor_right.voltage_limit = POWER_SUPPLY_VOLTAGE;
 
   // Initialize FOC
   motor_left.init();
@@ -146,8 +200,11 @@ void loop() {
     motor_right.target = 0.0f;
     digitalWrite(kStatusLedPin, HIGH);
   } else {
-    motor_left.target = target_voltage_left;
-    motor_right.target = target_voltage_right;
+    const bool velocity_mode = active_command == kCmdSetVelocity;
+    motor_left.controller = velocity_mode ? MotionControlType::velocity : MotionControlType::torque;
+    motor_right.controller = velocity_mode ? MotionControlType::velocity : MotionControlType::torque;
+    motor_left.target = velocity_mode ? target_velocity_left : target_voltage_left;
+    motor_right.target = velocity_mode ? target_velocity_right : target_voltage_right;
     digitalWrite(kStatusLedPin, LOW);
   }
 

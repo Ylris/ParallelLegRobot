@@ -12,6 +12,22 @@
 #define MOTOR_ZERO_ELECTRIC_ANGLE 3.585681f
 #endif
 
+#ifndef MOTOR_AUTO_ELECTRIC_ZERO
+#define MOTOR_AUTO_ELECTRIC_ZERO 0
+#endif
+
+#ifndef MOTOR_ALIGN_VOLTAGE
+#define MOTOR_ALIGN_VOLTAGE 3.0f
+#endif
+
+#ifndef MOTOR_AUTO_ELECTRIC_ZERO_OFFSET
+#define MOTOR_AUTO_ELECTRIC_ZERO_OFFSET 0.0f
+#endif
+
+#ifndef MOTOR_POLE_PAIRS
+#define MOTOR_POLE_PAIRS 11.0f
+#endif
+
 //初始化
 void Motor_init();
 //开环速度控制

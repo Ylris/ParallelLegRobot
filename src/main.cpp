@@ -41,7 +41,12 @@ static constexpr uint32_t kSummaryPeriodMs = 1000;
 static constexpr uint32_t kImuStreamPeriodMs = 50;
 static constexpr uint32_t kOnlineTimeoutMs = 500;
 static constexpr uint32_t kWheelStatePeriodMs = 20; // 50 Hz update for wheel I2C/FOC angles
+static constexpr uint32_t kBalancePeriodMs = 20;
 static constexpr int16_t kWheelPwmLimit = 1000;
+static constexpr int16_t kWheelVelocityLimitMradPerSec = 12000;
+static constexpr float kBalanceDefaultKpMradPerSecPerDeg = 220.0f;
+static constexpr float kBalanceDefaultKdMradPerSecPerDegS = 18.0f;
+static constexpr float kBalanceAbortPitchDeg = 35.0f;
 static constexpr float kStandbyXmm = 0.0f;
 static constexpr float kStandbyYmm = -100.0f;
 static constexpr float kHeightMinMm = 25.0f;
@@ -49,18 +54,18 @@ static constexpr float kHeightMaxMm = 120.0f;
 static constexpr float kTargetRampRadPerSec = 0.22f;
 static constexpr float kJointSoftLimitRad = 3.40f;
 static constexpr float kHoldKpDefaultMvPerRad = 10000.0f;
-static constexpr float kHoldKpId2MvPerRad = 16000.0f;
+static constexpr float kHoldKpId2MvPerRad = 19000.0f;
 static constexpr float kHoldKpId5MvPerRad = 18000.0f;
-static constexpr float kHoldKpId6MvPerRad = 17000.0f;
-static constexpr float kHoldKdMvPerRadSec = 450.0f;
+static constexpr float kHoldKpId6MvPerRad = 19000.0f;
+static constexpr float kHoldKdMvPerRadSec = 700.0f;
 static constexpr float kHoldStaticBoostThresholdRad = 0.020f;
 static constexpr float kHoldStaticBoostFullRad = 0.120f;
 static constexpr float kHoldStaticBoostId2Mv = 0.0f;
 static constexpr float kHoldStaticBoostId5Mv = 0.0f;
 static constexpr float kHoldStaticBoostId6Mv = 0.0f;
-static constexpr float kHoldFeedforwardId2Mv = -600.0f;
-static constexpr float kHoldFeedforwardId5Mv = -1200.0f;
-static constexpr float kHoldFeedforwardId6Mv = +800.0f;
+static constexpr float kHoldFeedforwardId2Mv = -900.0f;
+static constexpr float kHoldFeedforwardId5Mv = +1200.0f;
+static constexpr float kHoldFeedforwardId6Mv = -700.0f;
 static constexpr float kHoldFullPushThresholdRad = 0.35f;
 static constexpr float kId5LiftFullPushThresholdRad = 0.12f;
 static constexpr float kId5UpperMirrorOffsetRad = 0.90f;
@@ -106,7 +111,7 @@ struct MotorState {
 static constexpr MotorConfig kMotors[] = {
     {1, "left_front_upper", 4.860f, -1, -1},
     {2, "left_rear_lower", 5.553f, -1, -1},
-    {5, "right_front_upper", 0.161f, -1, +1},
+    {5, "right_front_upper", 0.161f, -1, -1},
     {6, "right_rear_lower", 1.991f, +1, +1},
 };
 
@@ -127,6 +132,7 @@ static uint32_t last_summary_ms = 0;
 static uint32_t last_imu_stream_ms = 0;
 static uint32_t last_wheel_stream_ms = 0;
 static uint32_t last_wheel_state_ms = 0;
+static uint32_t last_balance_ms = 0;
 static uint32_t last_hold_update_ms = 0;
 static uint32_t tx_fail_count = 0;
 static uint32_t can_recovery_count = 0;
@@ -155,6 +161,20 @@ static float left_wheel_angle_rad = 0.0f;
 static float right_wheel_angle_rad = 0.0f;
 static int16_t wheel_left_pwm = 0;
 static int16_t wheel_right_pwm = 0;
+static int16_t wheel_left_velocity_mrad_s = 0;
+static int16_t wheel_right_velocity_mrad_s = 0;
+static bool wheel_velocity_mode = false;
+static bool drive_enabled = false;
+static int16_t drive_forward_mrad_s = 0;
+static int16_t drive_turn_mrad_s = 0;
+static int drive_left_sign = 1;
+static int drive_right_sign = 1;
+static bool balance_enabled = false;
+static float balance_pitch_target_deg = 0.0f;
+static float balance_kp_mrad_per_sec_per_deg = kBalanceDefaultKpMradPerSecPerDeg;
+static float balance_kd_mrad_per_sec_per_deg_s = kBalanceDefaultKdMradPerSecPerDegS;
+static int balance_left_sign = 1;
+static int balance_right_sign = 1;
 
 static float normalizeRad(float rad) {
   while (rad > kPi) rad -= kTwoPi;
@@ -177,6 +197,12 @@ static int16_t clampTestMv(long mv) {
     return limited > 0 ? YYT_MIN_TEST_MV : -YYT_MIN_TEST_MV;
   }
   return limited;
+}
+
+static int16_t clampWheelVelocityMradS(long velocity_mrad_s) {
+  if (velocity_mrad_s > kWheelVelocityLimitMradPerSec) return kWheelVelocityLimitMradPerSec;
+  if (velocity_mrad_s < -kWheelVelocityLimitMradPerSec) return -kWheelVelocityLimitMradPerSec;
+  return static_cast<int16_t>(velocity_mrad_s);
 }
 
 static const MotorConfig *findMotor(int id) {
@@ -308,21 +334,18 @@ static bool readAS5600Encoder(uint8_t addr, uint16_t &raw, float &angle) {
   return true;
 }
 
-static bool sendWheelPwmToCoprocessor(int16_t left_pwm, int16_t right_pwm) {
+static bool sendWheelCommandToCoprocessor(uint8_t command, int16_t left_value, int16_t right_value) {
   if (YYT_DISABLE_I2C) {
     wheel_coprocessor_online = false;
     return false;
   }
 
-  left_pwm = constrain(left_pwm, -kWheelPwmLimit, kWheelPwmLimit);
-  right_pwm = constrain(right_pwm, -kWheelPwmLimit, kWheelPwmLimit);
-
   Wire.beginTransmission(WHEEL_PWM_COPROCESSOR_I2C_ADDR);
-  Wire.write(0x10);  // command register: set signed wheel PWM pair
-  Wire.write(static_cast<uint8_t>(left_pwm & 0xff));
-  Wire.write(static_cast<uint8_t>((left_pwm >> 8) & 0xff));
-  Wire.write(static_cast<uint8_t>(right_pwm & 0xff));
-  Wire.write(static_cast<uint8_t>((right_pwm >> 8) & 0xff));
+  Wire.write(command);
+  Wire.write(static_cast<uint8_t>(left_value & 0xff));
+  Wire.write(static_cast<uint8_t>((left_value >> 8) & 0xff));
+  Wire.write(static_cast<uint8_t>(right_value & 0xff));
+  Wire.write(static_cast<uint8_t>((right_value >> 8) & 0xff));
   // Send Left and Right raw encoder angles to STM32F103 for FOC commutation
   Wire.write(static_cast<uint8_t>(left_wheel_encoder_raw & 0xff));
   Wire.write(static_cast<uint8_t>((left_wheel_encoder_raw >> 8) & 0xff));
@@ -331,17 +354,46 @@ static bool sendWheelPwmToCoprocessor(int16_t left_pwm, int16_t right_pwm) {
   const bool ok = Wire.endTransmission() == 0;
 
   wheel_coprocessor_online = ok;
+  return ok;
+}
+
+static bool sendWheelPwmToCoprocessor(int16_t left_pwm, int16_t right_pwm) {
+  left_pwm = constrain(left_pwm, -kWheelPwmLimit, kWheelPwmLimit);
+  right_pwm = constrain(right_pwm, -kWheelPwmLimit, kWheelPwmLimit);
+
+  const bool ok = sendWheelCommandToCoprocessor(0x10, left_pwm, right_pwm);
   if (ok) {
     wheel_left_pwm = left_pwm;
     wheel_right_pwm = right_pwm;
+    wheel_left_velocity_mrad_s = 0;
+    wheel_right_velocity_mrad_s = 0;
+    wheel_velocity_mode = false;
   }
   return ok;
 }
 
-static void stopWheelPwm() {
+static bool sendWheelVelocityToCoprocessor(int16_t left_mrad_s, int16_t right_mrad_s) {
+  left_mrad_s = constrain(left_mrad_s, -kWheelVelocityLimitMradPerSec, kWheelVelocityLimitMradPerSec);
+  right_mrad_s = constrain(right_mrad_s, -kWheelVelocityLimitMradPerSec, kWheelVelocityLimitMradPerSec);
+
+  const bool ok = sendWheelCommandToCoprocessor(0x11, left_mrad_s, right_mrad_s);
+  if (ok) {
+    wheel_left_velocity_mrad_s = left_mrad_s;
+    wheel_right_velocity_mrad_s = right_mrad_s;
+    wheel_left_pwm = 0;
+    wheel_right_pwm = 0;
+    wheel_velocity_mode = true;
+  }
+  return ok;
+}
+
+static void stopWheelCommand() {
   wheel_left_pwm = 0;
   wheel_right_pwm = 0;
-  (void)sendWheelPwmToCoprocessor(0, 0);
+  wheel_left_velocity_mrad_s = 0;
+  wheel_right_velocity_mrad_s = 0;
+  wheel_velocity_mode = true;
+  (void)sendWheelVelocityToCoprocessor(0, 0);
 }
 
 static void updateWheelDevices() {
@@ -351,14 +403,18 @@ static void updateWheelDevices() {
                                readAS5600Encoder(RIGHT_WHEEL_ENCODER_I2C_ADDR, right_wheel_encoder_raw, right_wheel_angle_rad);
   wheel_coprocessor_online = i2cDevicePresent(WHEEL_PWM_COPROCESSOR_I2C_ADDR);
 
-  if (!wheel_armed && (wheel_left_pwm != 0 || wheel_right_pwm != 0)) {
-    stopWheelPwm();
+  if (!wheel_armed && (wheel_left_pwm != 0 || wheel_right_pwm != 0 ||
+                       wheel_left_velocity_mrad_s != 0 || wheel_right_velocity_mrad_s != 0)) {
+    stopWheelCommand();
   }
 }
 
 static void printWheelStatus() {
-  Serial.printf("wheel: armed=%s f103=%s left_enc=%s(0x%02X) raw_l=%u angle_l=%.4f rad | right_enc=%s(0x%02X) raw_r=%u angle_r=%.4f rad | pwm_l=%d pwm_r=%d\n",
+  Serial.printf("wheel: armed=%s mode=%s balance=%s drive=%s f103=%s left_enc=%s(0x%02X) raw_l=%u angle_l=%.4f rad | right_enc=%s(0x%02X) raw_r=%u angle_r=%.4f rad | pwm_l=%d pwm_r=%d vel_l=%d vel_r=%d mrad/s drive_fwd=%d drive_turn=%d drive_signs=[%+d,%+d] pitch_target=%.2f kp=%.1f kd=%.1f balance_signs=[%+d,%+d]\n",
                 wheel_armed ? "yes" : "no",
+                wheel_velocity_mode ? "velocity" : "pwm",
+                balance_enabled ? "on" : "off",
+                drive_enabled ? "on" : "off",
                 wheel_coprocessor_online ? "online" : "offline",
                 left_wheel_encoder_online ? "online" : "offline",
                 LEFT_WHEEL_ENCODER_I2C_ADDR,
@@ -369,7 +425,101 @@ static void printWheelStatus() {
                 right_wheel_encoder_raw,
                 right_wheel_angle_rad,
                 wheel_left_pwm,
-                wheel_right_pwm);
+                wheel_right_pwm,
+                wheel_left_velocity_mrad_s,
+                wheel_right_velocity_mrad_s,
+                drive_forward_mrad_s,
+                drive_turn_mrad_s,
+                drive_left_sign,
+                drive_right_sign,
+                balance_pitch_target_deg,
+                balance_kp_mrad_per_sec_per_deg,
+                balance_kd_mrad_per_sec_per_deg_s,
+                balance_left_sign,
+                balance_right_sign);
+}
+
+static void stopDrive(const char *reason) {
+  if (drive_enabled) {
+    Serial.printf("drive stopped: %s\n", reason);
+  }
+  drive_enabled = false;
+  drive_forward_mrad_s = 0;
+  drive_turn_mrad_s = 0;
+  if (!balance_enabled) {
+    (void)sendWheelVelocityToCoprocessor(0, 0);
+  }
+}
+
+static void stopBalance(const char *reason) {
+  if (balance_enabled) {
+    Serial.printf("balance stopped: %s\n", reason);
+  }
+  balance_enabled = false;
+  if (!drive_enabled) {
+    (void)sendWheelVelocityToCoprocessor(0, 0);
+  }
+}
+
+static void serviceWheelVelocityControl() {
+  if (!balance_enabled && !drive_enabled) return;
+
+  const uint32_t now = millis();
+  if (now - last_balance_ms < kBalancePeriodMs) return;
+  last_balance_ms = now;
+
+  if (!wheel_armed) {
+    stopBalance("wheel disarmed");
+    stopDrive("wheel disarmed");
+    stopWheelCommand();
+    return;
+  }
+
+  int16_t balance_velocity_mrad_s = 0;
+  if (balance_enabled) {
+    if (!imu.isConnected()) {
+      stopBalance("IMU offline");
+      return;
+    }
+
+    const float pitch_deg = imu.getPitch();
+    const float pitch_rate_deg_s = imu.getPitchRateDegS();
+    if (fabsf(pitch_deg - balance_pitch_target_deg) > kBalanceAbortPitchDeg) {
+      stopBalance("pitch outside abort limit");
+      stopDrive("pitch outside abort limit");
+      stopWheelCommand();
+      return;
+    }
+
+    const float pitch_err_deg = pitch_deg - balance_pitch_target_deg;
+    const float base_velocity_mrad_s =
+        balance_kp_mrad_per_sec_per_deg * pitch_err_deg +
+        balance_kd_mrad_per_sec_per_deg_s * pitch_rate_deg_s;
+    balance_velocity_mrad_s = clampWheelVelocityMradS(lroundf(base_velocity_mrad_s));
+  }
+
+  long left_velocity = 0;
+  long right_velocity = 0;
+  if (drive_enabled) {
+    left_velocity += static_cast<long>(drive_left_sign) *
+                     (static_cast<long>(drive_forward_mrad_s) - drive_turn_mrad_s);
+    right_velocity += static_cast<long>(drive_right_sign) *
+                      (static_cast<long>(drive_forward_mrad_s) + drive_turn_mrad_s);
+  }
+  if (balance_enabled) {
+    left_velocity += static_cast<long>(balance_left_sign) * balance_velocity_mrad_s;
+    right_velocity += static_cast<long>(balance_right_sign) * balance_velocity_mrad_s;
+  }
+
+  if (!sendWheelVelocityToCoprocessor(clampWheelVelocityMradS(left_velocity),
+                                      clampWheelVelocityMradS(right_velocity))) {
+    balance_enabled = false;
+    drive_enabled = false;
+    drive_forward_mrad_s = 0;
+    drive_turn_mrad_s = 0;
+    stopWheelCommand();
+    Serial.println("wheel velocity control stopped: I2C send failed");
+  }
 }
 
 static bool sendGroup(uint32_t can_id, int first_motor_id) {
@@ -584,16 +734,10 @@ static void updateHeightHold() {
     stopHeightHold("all hold motors offline");
     return;
   }
-  if (tx_fail_count != height_hold_start_tx_fail) {
-    stopHeightHold("CAN transmit failed during height hold");
-    return;
-  }
-
   twai_status_info_t can_status = {};
   if (twai_get_status_info(&can_status) != ESP_OK ||
-      can_status.state != TWAI_STATE_RUNNING ||
-      can_status.bus_error_count != height_hold_start_bus_error) {
-    stopHeightHold("CAN bus error during height hold");
+      can_status.state != TWAI_STATE_RUNNING) {
+    stopHeightHold("CAN controller not running during height hold");
     return;
   }
 
@@ -652,11 +796,19 @@ static void printHelp() {
   Serial.println("  i2cscan               scan shared I2C bus on SDA GPIO4 / SCL GPIO3");
   Serial.println("  imu                   print MPU6050 pitch/roll/yaw once");
   Serial.println("  imustream <on|off>    stream imu:pitch,roll,yaw for PioPulse/plotters");
-  Serial.println("  wheel                 print wheel I2C/PWM/encoder status");
-  Serial.println("  wheelarm              allow STM32F103 wheel PWM commands");
-  Serial.println("  wheeldisarm           force wheel PWM to 0 and disable wheel commands");
-  Serial.println("  wheelpwm <l> <r>      send signed left/right wheel PWM, -1000..1000");
-  Serial.println("  wheelstream <on|off>  stream wheel:angle,pwm_l,pwm_r");
+  Serial.println("  wheel                 print wheel I2C/velocity/PWM/encoder status");
+  Serial.println("  wheelarm              allow STM32F103 wheel velocity/drive commands");
+  Serial.println("  wheeldisarm           force wheel velocity to 0 and disable wheel commands");
+  Serial.println("  wheelpwm <l> <r>      legacy manual signed PWM, -1000..1000");
+  Serial.println("  wheelvel <l> <r>      send signed left/right wheel velocity, mrad/s");
+  Serial.println("  drive <fwd> <turn>    persistent forward/turn wheel velocity, mrad/s");
+  Serial.println("  drive stop            stop persistent drive velocity");
+  Serial.println("  drive sign <l> <r>    set drive wheel signs, each +1 or -1");
+  Serial.println("  balance on|off        IMU pitch loop, sends wheel velocity over I2C");
+  Serial.println("  balance zero          use current pitch as balance target");
+  Serial.println("  balance gain <kp> <kd> set velocity gains in mrad/s per deg and deg/s");
+  Serial.println("  balance sign <l> <r>  set wheel velocity signs, each +1 or -1");
+  Serial.println("  wheelstream <on|off>  stream wheel angle, PWM, velocity, and link state");
   Serial.println("  dirs                  print direction-test checklist and current q");
   Serial.println("  arm                   allow CAN voltage output, still sends 0 mV first");
   Serial.println("  disarm                stop all output and leave safe mode");
@@ -778,13 +930,20 @@ static void printStatus() {
                 imu.getPitch(),
                 imu.getRoll(),
                 imu.getYaw());
-  Serial.printf("  wheel f103=%s left_enc=%s right_enc=%s wheel_armed=%s pwm_l=%d pwm_r=%d angle_l=%.4f rad angle_r=%.4f rad\n",
+  Serial.printf("  wheel f103=%s left_enc=%s right_enc=%s wheel_armed=%s mode=%s balance=%s drive=%s pwm_l=%d pwm_r=%d vel_l=%d vel_r=%d mrad/s drive_fwd=%d drive_turn=%d angle_l=%.4f rad angle_r=%.4f rad\n",
                 wheel_coprocessor_online ? "online" : "offline",
                 left_wheel_encoder_online ? "online" : "offline",
                 right_wheel_encoder_online ? "online" : "offline",
                 wheel_armed ? "yes" : "no",
+                wheel_velocity_mode ? "velocity" : "pwm",
+                balance_enabled ? "on" : "off",
+                drive_enabled ? "on" : "off",
                 wheel_left_pwm,
                 wheel_right_pwm,
+                wheel_left_velocity_mrad_s,
+                wheel_right_velocity_mrad_s,
+                drive_forward_mrad_s,
+                drive_turn_mrad_s,
                 left_wheel_angle_rad,
                 right_wheel_angle_rad);
 }
@@ -794,10 +953,11 @@ static void printImuStatus() {
     Serial.println("IMU offline: MPU6050 not detected on I2C");
     return;
   }
-  Serial.printf("IMU pitch=%+.2f roll=%+.2f yaw=%+.2f deg stream=%s\n",
+  Serial.printf("IMU pitch=%+.2f roll=%+.2f yaw=%+.2f deg pitch_rate=%+.2f deg/s stream=%s\n",
                 imu.getPitch(),
                 imu.getRoll(),
                 imu.getYaw(),
+                imu.getPitchRateDegS(),
                 imu_stream_enabled ? "on" : "off");
 }
 
@@ -1007,8 +1167,73 @@ static void handleCommand(String line) {
     Serial.println("IMU stream disabled");
     return;
   }
-  if (line.equalsIgnoreCase("balance")) {
-    Serial.println("balance is intentionally disabled in safe bring-up firmware; use imu/imustream first");
+  if (line.equalsIgnoreCase("balance") || line.equalsIgnoreCase("balance status")) {
+    Serial.printf("balance=%s target_pitch=%+.2f pitch=%+.2f pitch_rate=%+.2f kp=%.1f kd=%.1f signs=[%+d,%+d] drive=%s fwd=%d turn=%d vel=[%+d,%+d] mrad/s limit=+/-%d\n",
+                  balance_enabled ? "on" : "off",
+                  balance_pitch_target_deg,
+                  imu.getPitch(),
+                  imu.getPitchRateDegS(),
+                  balance_kp_mrad_per_sec_per_deg,
+                  balance_kd_mrad_per_sec_per_deg_s,
+                  balance_left_sign,
+                  balance_right_sign,
+                  drive_enabled ? "on" : "off",
+                  drive_forward_mrad_s,
+                  drive_turn_mrad_s,
+                  wheel_left_velocity_mrad_s,
+                  wheel_right_velocity_mrad_s,
+                  kWheelVelocityLimitMradPerSec);
+    return;
+  }
+  if (line.equalsIgnoreCase("balance on")) {
+    if (!wheel_armed) {
+      Serial.println("refused: type wheelarm first");
+      return;
+    }
+    if (!imu.isConnected()) {
+      Serial.println("refused: IMU offline");
+      return;
+    }
+    balance_pitch_target_deg = imu.getPitch();
+    balance_enabled = true;
+    last_balance_ms = 0;
+    (void)sendWheelVelocityToCoprocessor(0, 0);
+    Serial.printf("balance enabled: target_pitch=%+.2f deg, sending wheel velocity over I2C\n",
+                  balance_pitch_target_deg);
+    return;
+  }
+  if (line.equalsIgnoreCase("balance off")) {
+    stopBalance("user command");
+    return;
+  }
+  if (line.equalsIgnoreCase("balance zero")) {
+    if (!imu.isConnected()) {
+      Serial.println("refused: IMU offline");
+      return;
+    }
+    balance_pitch_target_deg = imu.getPitch();
+    Serial.printf("balance target pitch set to current pitch: %+.2f deg\n",
+                  balance_pitch_target_deg);
+    return;
+  }
+  if (line.equalsIgnoreCase("drive") || line.equalsIgnoreCase("drive status")) {
+    Serial.printf("drive=%s fwd=%+d turn=%+d mrad/s signs=[%+d,%+d] wheel_armed=%s balance=%s vel=[%+d,%+d] mrad/s\n",
+                  drive_enabled ? "on" : "off",
+                  drive_forward_mrad_s,
+                  drive_turn_mrad_s,
+                  drive_left_sign,
+                  drive_right_sign,
+                  wheel_armed ? "yes" : "no",
+                  balance_enabled ? "on" : "off",
+                  wheel_left_velocity_mrad_s,
+                  wheel_right_velocity_mrad_s);
+    return;
+  }
+  if (line.equalsIgnoreCase("drive stop")) {
+    stopDrive("user command");
+    if (!balance_enabled) {
+      stopWheelCommand();
+    }
     return;
   }
   if (line.equalsIgnoreCase("wheel")) {
@@ -1018,14 +1243,21 @@ static void handleCommand(String line) {
   }
   if (line.equalsIgnoreCase("wheelarm")) {
     wheel_armed = true;
-    stopWheelPwm();
-    Serial.println("wheel armed: PWM output is allowed, current wheel PWM is 0");
+    drive_enabled = false;
+    drive_forward_mrad_s = 0;
+    drive_turn_mrad_s = 0;
+    stopWheelCommand();
+    Serial.println("wheel armed: velocity output is allowed, current wheel velocity is 0");
     return;
   }
   if (line.equalsIgnoreCase("wheeldisarm")) {
+    balance_enabled = false;
+    drive_enabled = false;
+    drive_forward_mrad_s = 0;
+    drive_turn_mrad_s = 0;
     wheel_armed = false;
-    stopWheelPwm();
-    Serial.println("wheel disarmed: PWM forced to 0");
+    stopWheelCommand();
+    Serial.println("wheel disarmed: velocity forced to 0");
     return;
   }
   if (line.equalsIgnoreCase("wheelstream on")) {
@@ -1050,21 +1282,29 @@ static void handleCommand(String line) {
   }
   if (line.equalsIgnoreCase("disarm")) {
     boot_fixed_pose_pending = false;
+    balance_enabled = false;
+    drive_enabled = false;
+    drive_forward_mrad_s = 0;
+    drive_turn_mrad_s = 0;
     height_hold_enabled = false;
     clearCommands();
     armed = false;
     sendMotorCommands();
     wheel_armed = false;
-    stopWheelPwm();
+    stopWheelCommand();
     Serial.println("disarmed: all outputs forced to 0 mV");
     return;
   }
   if (line.equalsIgnoreCase("stop")) {
     boot_fixed_pose_pending = false;
+    balance_enabled = false;
+    drive_enabled = false;
+    drive_forward_mrad_s = 0;
+    drive_turn_mrad_s = 0;
     height_hold_enabled = false;
     clearCommands();
     sendMotorCommands();
-    stopWheelPwm();
+    stopWheelCommand();
     Serial.println("stopped: all commands set to 0 mV");
     return;
   }
@@ -1189,17 +1429,107 @@ static void handleCommand(String line) {
   int sign = 0;
   int left_pwm = 0;
   int right_pwm = 0;
+  int left_velocity = 0;
+  int right_velocity = 0;
+  int drive_forward = 0;
+  int drive_turn = 0;
+  int left_drive_sign = 0;
+  int right_drive_sign = 0;
+  int left_balance_sign = 0;
+  int right_balance_sign = 0;
+  float balance_kp = 0.0f;
+  float balance_kd = 0.0f;
+  if (sscanf(line.c_str(), "balance gain %f %f", &balance_kp, &balance_kd) == 2) {
+    if (balance_kp < 0.0f || balance_kd < 0.0f) {
+      Serial.println("refused: balance gains must be non-negative");
+      return;
+    }
+    balance_kp_mrad_per_sec_per_deg = balance_kp;
+    balance_kd_mrad_per_sec_per_deg_s = balance_kd;
+    Serial.printf("balance gains set: kp=%.1f kd=%.1f\n",
+                  balance_kp_mrad_per_sec_per_deg,
+                  balance_kd_mrad_per_sec_per_deg_s);
+    return;
+  }
+  if (sscanf(line.c_str(), "balance sign %d %d", &left_balance_sign, &right_balance_sign) == 2) {
+    if ((left_balance_sign != 1 && left_balance_sign != -1) ||
+        (right_balance_sign != 1 && right_balance_sign != -1)) {
+      Serial.println("refused: balance signs must be +1 or -1");
+      return;
+    }
+    balance_left_sign = left_balance_sign;
+    balance_right_sign = right_balance_sign;
+    Serial.printf("balance wheel velocity signs set: left=%+d right=%+d\n",
+                  balance_left_sign,
+                  balance_right_sign);
+    return;
+  }
+  if (sscanf(line.c_str(), "drive sign %d %d", &left_drive_sign, &right_drive_sign) == 2) {
+    if ((left_drive_sign != 1 && left_drive_sign != -1) ||
+        (right_drive_sign != 1 && right_drive_sign != -1)) {
+      Serial.println("refused: drive signs must be +1 or -1");
+      return;
+    }
+    drive_left_sign = left_drive_sign;
+    drive_right_sign = right_drive_sign;
+    Serial.printf("drive wheel signs set: left=%+d right=%+d\n",
+                  drive_left_sign,
+                  drive_right_sign);
+    return;
+  }
+  if (sscanf(line.c_str(), "drive %d %d", &drive_forward, &drive_turn) == 2) {
+    if (!wheel_armed) {
+      Serial.println("refused: type wheelarm first");
+      return;
+    }
+    drive_forward_mrad_s = clampWheelVelocityMradS(drive_forward);
+    drive_turn_mrad_s = clampWheelVelocityMradS(drive_turn);
+    drive_enabled = (drive_forward_mrad_s != 0 || drive_turn_mrad_s != 0);
+    last_balance_ms = 0;
+    if (!drive_enabled && !balance_enabled) {
+      stopWheelCommand();
+    }
+    Serial.printf("drive %s: fwd=%+d turn=%+d mrad/s signs=[%+d,%+d] balance=%s\n",
+                  drive_enabled ? "enabled" : "stopped",
+                  drive_forward_mrad_s,
+                  drive_turn_mrad_s,
+                  drive_left_sign,
+                  drive_right_sign,
+                  balance_enabled ? "on" : "off");
+    return;
+  }
   if (sscanf(line.c_str(), "wheelpwm %d %d", &left_pwm, &right_pwm) == 2) {
     if (!wheel_armed) {
       Serial.println("refused: type wheelarm first");
       return;
     }
+    balance_enabled = false;
+    drive_enabled = false;
+    drive_forward_mrad_s = 0;
+    drive_turn_mrad_s = 0;
     const bool ok = sendWheelPwmToCoprocessor(static_cast<int16_t>(left_pwm),
                                               static_cast<int16_t>(right_pwm));
     Serial.printf("wheel PWM %s: left=%d right=%d\n",
                   ok ? "sent" : "failed",
                   wheel_left_pwm,
                   wheel_right_pwm);
+    return;
+  }
+  if (sscanf(line.c_str(), "wheelvel %d %d", &left_velocity, &right_velocity) == 2) {
+    if (!wheel_armed) {
+      Serial.println("refused: type wheelarm first");
+      return;
+    }
+    balance_enabled = false;
+    drive_enabled = false;
+    drive_forward_mrad_s = 0;
+    drive_turn_mrad_s = 0;
+    const bool ok = sendWheelVelocityToCoprocessor(static_cast<int16_t>(left_velocity),
+                                                   static_cast<int16_t>(right_velocity));
+    Serial.printf("wheel velocity %s: left=%d right=%d mrad/s\n",
+                  ok ? "sent" : "failed",
+                  wheel_left_velocity_mrad_s,
+                  wheel_right_velocity_mrad_s);
     return;
   }
 
@@ -1467,7 +1797,7 @@ void setup() {
       Serial.println("IMU init skipped/failed; motor CAN bring-up can still continue");
     }
     updateWheelDevices();
-    stopWheelPwm();
+    stopWheelCommand();
   }
 
   desired_target[1] = kFixedPoseTargetId1Rad;
@@ -1515,6 +1845,9 @@ void loop() {
     last_wheel_state_ms = now;
     updateWheelDevices();
   }
+  if (!YYT_DISABLE_I2C) {
+    serviceWheelVelocityControl();
+  }
 
   if (!YYT_DISABLE_I2C && imu_stream_enabled && imu.isConnected() && now - last_imu_stream_ms >= kImuStreamPeriodMs) {
     last_imu_stream_ms = now;
@@ -1526,11 +1859,14 @@ void loop() {
 
   if (wheel_stream_enabled && now - last_wheel_stream_ms >= kImuStreamPeriodMs) {
     last_wheel_stream_ms = now;
-    Serial.printf("wheel:%.4f,%.4f,%d,%d,%s,%s,%s\n",
+    Serial.printf("wheel:%.4f,%.4f,%d,%d,%d,%d,%s,%s,%s,%s\n",
                   left_wheel_angle_rad,
                   right_wheel_angle_rad,
                   wheel_left_pwm,
                   wheel_right_pwm,
+                  wheel_left_velocity_mrad_s,
+                  wheel_right_velocity_mrad_s,
+                  balance_enabled ? "balance_on" : "balance_off",
                   wheel_coprocessor_online ? "f103_online" : "f103_offline",
                   left_wheel_encoder_online ? "L_online" : "L_offline",
                   right_wheel_encoder_online ? "R_online" : "R_offline");

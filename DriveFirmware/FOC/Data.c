@@ -2,7 +2,11 @@
 
 
 //电机相关
-float sensor_direction =1;//编码器方向
+#ifndef MOTOR_SENSOR_DIRECTION
+#define MOTOR_SENSOR_DIRECTION 1.0f
+#endif
+
+float sensor_direction = MOTOR_SENSOR_DIRECTION;//编码器方向
 float pole_pairs = 14;//电机极对数
 float voltage_power_supply =12;//供电电压
 float Ualpha=0,Ubeta=0,Ua=0,Ub=0,Uc=0;

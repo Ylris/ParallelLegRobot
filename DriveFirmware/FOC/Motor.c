@@ -3,10 +3,52 @@
 
 float shaft_angle=0,open_loop_timestamp=0;
 
+#ifndef MOTOR_SKIP_BOOT_SWEEP
+#define MOTOR_SKIP_BOOT_SWEEP 0
+#endif
+
 
 void Motor_init()
 {
     float angle;
+
+#if MOTOR_AUTO_ELECTRIC_ZERO
+	pole_pairs = MOTOR_POLE_PAIRS;
+#endif
+
+#if MOTOR_ALIGN_ONLY
+	/* Align-only mode for on-leg calibration.
+	   Slowly sweeps ONE electrical cycle (25.7 deg mechanical for pp=14)
+	   to drag the rotor to a known electrical position, then reads the
+	   encoder to compute the electrical zero.  Safe on assembled legs. */
+	pole_pairs = MOTOR_POLE_PAIRS;
+
+	/* Sweep forward one full electrical cycle at low speed */
+	for (int i = 0; i <= 200; i++) {
+		float sweep_angle = _3PI_2 + _2PI * (float)i / 200.0f;
+		setPhaseVoltage(MOTOR_ALIGN_VOLTAGE, 0, sweep_angle);
+		HAL_Delay(3);
+	}
+	/* Sweep back to the target angle */
+	for (int i = 200; i >= 0; i--) {
+		float sweep_angle = _3PI_2 + _2PI * (float)i / 200.0f;
+		setPhaseVoltage(MOTOR_ALIGN_VOLTAGE, 0, sweep_angle);
+		HAL_Delay(3);
+	}
+	/* Hold at target angle and let rotor fully settle */
+	setPhaseVoltage(MOTOR_ALIGN_VOLTAGE, 0, _3PI_2);
+	HAL_Delay(500);
+	zero_electric_angle = _normalizeAngle((float)(sensor_direction * pole_pairs) * MT6816_Get_AngleData() + MOTOR_AUTO_ELECTRIC_ZERO_OFFSET);
+	setPhaseVoltage(0, 0, _3PI_2);
+	return;
+#endif
+
+#if MOTOR_SKIP_BOOT_SWEEP
+	pole_pairs = MOTOR_POLE_PAIRS;
+	zero_electric_angle=MOTOR_ZERO_ELECTRIC_ANGLE;
+	setPhaseVoltage(0, 0,_3PI_2);
+	return;
+#endif
 
     for(int i=0; i<=500*1; i++)
 	{
@@ -23,10 +65,13 @@ void Motor_init()
 	}
 	setPhaseVoltage(0, 0,  angle);
 	HAL_Delay(100);
-	setPhaseVoltage(3, 0,_3PI_2);
+	setPhaseVoltage(MOTOR_ALIGN_VOLTAGE, 0,_3PI_2);
 	HAL_Delay(300);
-	//zero_electric_angle=_electricalAngle();
+#if MOTOR_AUTO_ELECTRIC_ZERO
+	zero_electric_angle = _normalizeAngle((float)(sensor_direction * pole_pairs) * MT6816_Get_AngleData() + MOTOR_AUTO_ELECTRIC_ZERO_OFFSET);
+#else
 	zero_electric_angle=MOTOR_ZERO_ELECTRIC_ANGLE;
+#endif
   setPhaseVoltage(0, 0,_3PI_2);
 
 }
