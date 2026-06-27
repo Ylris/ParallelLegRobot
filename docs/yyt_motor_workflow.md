@@ -67,6 +67,7 @@ Current sweep-align zero sampling defaults:
 | --- | ---: | --- |
 | `MOTOR_ALIGN_AVG_SAMPLES` | `32` | number of encoder samples after settle |
 | `MOTOR_ALIGN_AVG_DELAY_MS` | `2U` | delay between samples |
+| `CAN_FEEDBACK_PERIOD_US` | `5000U` | feedback period for sweep-align actuator builds |
 
 The firmware uses a circular average of the sampled electrical angle, so values
 near 0 and 2π are averaged correctly.
