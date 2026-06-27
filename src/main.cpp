@@ -119,12 +119,12 @@ static MotorState motor_state[9];
 static int16_t command_mv[9] = {};
 static int motor_sign[9] = {};
 static bool direction_tested[9] = {};
-static bool armed = true;
+static bool armed = false;
 static bool direction_confirmed = false;
 static bool height_hold_enabled = false;
 static bool hold_requires_direction_confirmed = true;
 static bool hold_motor_enabled[9] = {};
-static bool boot_fixed_pose_pending = true;
+static bool boot_fixed_pose_pending = false;
 static float desired_target[9] = {};
 static float ramped_target[9] = {};
 static uint32_t last_command_ms = 0;
@@ -964,7 +964,7 @@ static void printImuStatus() {
 static void printDirectionCheck() {
   Serial.println("direction check helper:");
   Serial.println("  1) type: arm");
-  Serial.println("  2) test each joint with: test <id> 80 100");
+  Serial.println("  2) test each joint with: test <id> 6000 100");
   Serial.println("  3) write down dq. Positive mv should move in the expected positive joint direction.");
   Serial.println("  4) only after all four are correct, type: confirm_dirs");
   Serial.println("current q:");
@@ -1772,7 +1772,7 @@ void setup() {
                 I2C_SDA_PIN,
                 I2C_SCL_PIN,
                 static_cast<unsigned long>(I2C_BUS_HZ));
-  Serial.println("boot policy: armed by default, auto-hold saved fixed pose after leg feedback is online");
+  Serial.println("boot policy: disarmed by default, no automatic leg motion");
 
   for (const auto &motor : kMotors) {
     motor_sign[motor.id] = motor.sign;

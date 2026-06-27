@@ -1,120 +1,106 @@
 # Current Handoff
 
-Last updated: 2026-06-19 08:21 CST (Asia/Shanghai)
+Last updated: 2026-06-28 CST (Asia/Shanghai)
 
 > [!IMPORTANT]
-> 读这个文件先，然后读 `docs/yyt_motor_workflow.md` 和 `docs/yyt_firmware_backups.md`。
+> 当前阶段先把 YYT 腿电机调成可靠执行器。先不要调轮电机、新 IMU、平衡、站立高度闭环。
 
-## 当前状态：需要重启 Mac 恢复 USB
+## 当前目标
 
-用户正在重启 Mac 来解决 USB 串口识别问题。ESP32 和 USB 线硬件正常（别的电脑能识别到），是 macOS USB 子系统卡住了。
+把 ID1/ID2/ID5/ID6 四块 YYT MiniOdrive 都统一成：
 
-### 重启后操作步骤
-1. 插上 ESP32 USB 线
-2. 确认 `ls /dev/cu.usbmodem*` 能看到设备
-3. 给电机供电（12V）
-4. 等待 ~3 秒让电机完成 sweep-align 对齐
-5. 运行高度闭环测试：
-```
-arm
-confirm_dirs
-height 83
-status
-# 观察几秒
-holdoff
-disarm
-```
+- 上电做 sweep-align 电角度对齐
+- 通过 CAN 稳定 online 并回传角度
+- 收到 ESP32 的 mV 电压命令后平滑出力
+- 不使用 YYT 本地位置保持作为通用默认行为
+- 默认 0 mV，不主动动作；ESP32 输入 `arm` 后才允许点动
 
-### 关键参数
-- **USB 串口**: `/dev/cu.usbmodem11301`，115200，DTR=True，RTS=False
-- **目标高度**: **83mm**（用户确认的站立高度，不要用 100mm）
-- **ST-Link**: 物理连接在 **ID2** 板子上
+ESP32 仍然是上位机，负责之后的腿高、姿态、整车控制；YYT 先只做底层 FOC/电压执行器。
 
-## Drive 固件状态
+## 当前现场状态
 
-四个电机全部刷了 **sweep-align 12V** 固件（最新版）：
+- ST-Link 当前按用户描述接在 ID2。
+- 已重新编译并烧录 ID2 的 sweep-align CAN 电压执行器固件。
+- 烧录命令已执行成功，OpenOCD 输出 `Verified OK`。
+- ESP32 主控程序已编译通过。
+- macOS 当前没有识别到 ESP32 USB 串口；扫描只看到 `/dev/cu.Bluetooth-Incoming-Port` 和 `/dev/cu.debug-console`。
+- 因为没有 ESP32 串口，暂时还不能发 `status`、`arm`、`test` 来验证 CAN 和 ID2 正负点动。
 
-| Drive | DRIVE_ID | 对齐方式 | 对齐电压 | 固件版本 |
-|-------|----------|---------|---------|---------|
-| ID1 | 1 | sweep-align | 12V | 最新 |
-| ID2 | 2 | sweep-align | 12V | 最新 |
-| ID5 | 5 | sweep-align | 12V | 最新 |
-| ID6 | 6 | sweep-align | 12V | 最新 |
+## 立即下一步
 
-### Drive 固件编译命令
+1. 插好 ESP32 主控板 Type-C USB 线。
+2. 让 macOS 出现类似 `/dev/cu.usbmodem...` 或 `/dev/cu.usbserial...` 的端口。
+3. 给 YYT 板上 12V 动力电源，限流保守，电机保持自由转动或架空。
+4. 等待 3 秒左右，让 ID2 完成 sweep-align。
+5. 查询状态：
+
 ```sh
-make -C DriveFirmware clean && make -C DriveFirmware \
-  DRIVE_ID=<N> MOTOR_ALIGN_ONLY=1 MOTOR_POLE_PAIRS=14.0f \
-  MOTOR_ALIGN_VOLTAGE=12.0f FOC_MODULATION_LIMIT=1.0f \
-  CAN_MAX_COMMAND_VOLTAGE=12.0f DRIVE_AUTO_ZERO_HOLD=0 \
-  YYT_DISABLE_OUTPUT=0 all
+cd /Users/ylris/轮腿/ParallelLegRobot
+python3 -B tools/read_status_safe.py --command status
+python3 -B tools/read_status_safe.py --command can
 ```
 
-### Sweep-align 原理
-在 `DriveFirmware/FOC/Motor.c` 中 `MOTOR_ALIGN_ONLY` 模式：
-- 12V 电压缓慢扫过一个电周期（25.7° 机械角，200步×3ms）
-- 正向扫一圈再反向扫回来
-- 最后在目标角度保持 500ms，读编码器计算电零点
-- 比简单施加固定电压更可靠，但仍有 ~30% 概率对齐失败（dq≈0）
-- 对齐失败的解决方法：断电重新上电
+6. 如果 ID2 online，再做正负点动：
 
-## ESP32 主控固件状态
-- PlatformIO 项目，环境 `esp32-c3-devkitm-1`
-- 上传命令: `pio run -e esp32-c3-devkitm-1 -t upload`
-- 固件功能正常，只改了 `src/main.cpp` 中的：
-  - PD 增益: Kp=3000, Kd=150
-  - drive_sign 映射
-  - IK 高度→关节角度计算
-  - 斜坡率: 0.08 rad/s
+```sh
+python3 -B tools/test_pulse_safe.py --id 2 --mv 6000 --ms 100 --no-reset
+python3 -B tools/test_pulse_safe.py --id 2 --mv -6000 --ms 100 --no-reset
+```
 
-## 高度闭环测试结果（成功的那次）
+正常现象：
 
-在全部重新上电后，四电机全部对齐成功时的数据：
+- `status` 里 ID2 是 `online`
+- `can` 里状态是 `running`
+- 正负点动都有角度变化，`dq` 一正一负，幅度接近
+- 电机只轻微转动，不尖叫、不抖、不乱转
+- `tx_fail` 不持续增加
 
-### 方向脉冲测试（全部对称）
-| Drive | +6000 mV → dq | -6000 mV → dq |
-|-------|--------------|---------------|
-| ID1 | +0.547 | -0.556 |
-| ID2 | -0.540 | +0.547 |
-| ID5 | -0.626 | +0.619 |
-| ID6 | -0.567 | +0.573 |
+异常处理：
 
-### 83mm 高度闭环（稳定运行 13 秒）
-| 电机 | q (rad) | target (rad) | cmd (mV) |
-|------|---------|-------------|----------|
-| ID1 | -0.962 | -0.881 | -243 |
-| ID2 | +1.454 | +1.111 | +1024 |
-| ID5 | +1.320 | +1.185 | +387 |
-| ID6 | +0.691 | +0.616 | -221 |
+- 没有 USB 串口：换 Type-C 线/方向/接口，必要时重启 Mac。
+- ID2 offline：检查 CANH/CANL/GND、YYT 主电源、ID2 固件是否烧在正确板子上。
+- 点动 `dq≈0`：断电重新上电，让 sweep-align 重跑，再测一次。
+- 抖动、尖叫、过流、乱转：立刻断动力电源，保留串口输出再分析。
 
-## drive_sign 和方向
-- 用户要求: **ID1/5 向前，ID2/6 向后**
-- 当前 sign: ID1=+1, ID2=-1, ID5=-1, ID6=+1（在 main.cpp 中）
-- 方向尚未完全验证（用户还没确认物理方向是否正确）
+## Drive 固件目标
 
-## 已知问题
+推荐使用 `DriveFirmware` 的新目标：
 
-### 1. 对齐不稳定（~70% 成功率）
-上电后 sweep-align 有时标定到 d 轴（dq≈0），需断电重试。
-未来改进：对齐后自动检测，如果 dq≈0 则偏移 PI/2 重试。
+```sh
+cd /Users/ylris/轮腿/ParallelLegRobot
+make -C DriveFirmware DRIVE_ID=2 sweep-align-id
+openocd -f interface/stlink.cfg -f target/stm32g4x.cfg \
+  -c "adapter speed 100; init; reset halt; program DriveFirmware/build/turing_CBU6.bin 0x08000000 verify reset; shutdown"
+```
 
-### 2. ID1 CAN 间歇掉线
-移动 ST-Link 线缆时 ID1 可能掉线。全部重新上电后通常恢复。
+同一流程按物理 ST-Link 连接依次替换 `DRIVE_ID=1/2/5/6`。不要在 ST-Link 还接着 ID2 时烧 ID1/5/6。
 
-### 3. macOS USB 识别问题
-本次会话后期 macOS 无法识别 ESP32 USB（别的电脑可以），
-需要重启 Mac 解决。
+当前 sweep-align 默认参数：
 
-## 修改过的文件
-- `src/main.cpp` — PD 增益、drive_sign、IK 修复
-- `DriveFirmware/FOC/Motor.c` — MOTOR_ALIGN_ONLY sweep 模式
-- `DriveFirmware/Makefile` — MOTOR_ALIGN_ONLY 编译变量
-- `docs/current_handoff.md` — 本文件
+- `MOTOR_ALIGN_ONLY=1`
+- `MOTOR_POLE_PAIRS=14.0f`
+- `MOTOR_ALIGN_VOLTAGE=12.0f`
+- `FOC_MODULATION_LIMIT=1.0f`
+- `CAN_MAX_COMMAND_VOLTAGE=12.0f`
+- `DRIVE_AUTO_ZERO_HOLD=0`
+- `YYT_DISABLE_OUTPUT=0`
 
-## 下一步计划
-1. 重启 Mac，恢复 USB 连接
-2. 重新上电，跑 `height 83` 闭环测试
-3. 让用户确认物理方向（ID1/5 是否向前）
-4. 如果方向不对，调整 drive_sign
-5. 改进 align 可靠性（加自检+自动重试）
-6. 长时间稳定性测试
+## ESP32 主控状态
+
+- 默认环境：`esp32-c3-devkitm-1`
+- 当前编译通过。
+- 已改为上电 `disarmed`。
+- 已关闭上电自动 fixed-pose hold。
+- 已关闭 `YYT_ALLOW_UNTESTED_DIRS` 绕过，必须点动 ID1/2/5/6 后才允许 `confirm_dirs`。
+- 串口命令以 `status`、`can`、`dirs`、`arm`、`test`、`stop`、`disarm` 为主。
+- 当前阶段不要使用 `height`、`stand`、`balance on`。
+
+## 四块腿电机通过标准
+
+- ID1/ID2/ID5/ID6 都能稳定 online。
+- 每个 ID 的 `test <id> 6000 100` 和 `test <id> -6000 100` 都能产生可预测方向。
+- 点动后角度反馈变化合理，正负 `dq` 幅度接近。
+- 无明显抖动、尖叫、过流、乱跳。
+- CAN 不掉线，`tx_fail` 不持续增加。
+
+四块都通过以后，再装回机械腿，重新做机械零点、方向确认、腿高保持。

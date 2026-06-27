@@ -59,7 +59,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", help="Serial port, for example /dev/cu.usbmodem1301")
     parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--mv", type=int, default=80)
+    parser.add_argument("--mv", type=int, default=6000,
+                        help="Signed pulse voltage in mV; matches the ESP32 default test floor.")
     parser.add_argument("--ms", type=int, default=100)
     parser.add_argument("--yes", action="store_true", help="Do not pause before each motor pulse")
     parser.add_argument("--log", type=Path, help="Log file path. Defaults to logs/leg_test_*.txt")

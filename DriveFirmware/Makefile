@@ -38,6 +38,10 @@ CAN_SPIN_TEST_VOLTAGE ?= 6.0f
 CAN_SPIN_TEST_VELOCITY ?= 0.12f
 CAN_PHASE_SCAN_ENABLE ?= 0
 CAN_MAX_COMMAND_VOLTAGE ?= 12.0f
+SWEEP_ALIGN_POLE_PAIRS ?= 14.0f
+SWEEP_ALIGN_VOLTAGE ?= 12.0f
+SWEEP_ALIGN_FOC_MODULATION_LIMIT ?= 1.0f
+SWEEP_ALIGN_CAN_MAX_COMMAND_VOLTAGE ?= 12.0f
 
 MCU := -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 DEFS := -DUSE_HAL_DRIVER -DSTM32G431xx -DYYT_SAFE_START=$(SAFE_START) -DDRIVE_ID=$(DRIVE_ID) -DCAN_FEEDBACK_SINGLE_TURN=$(CAN_FEEDBACK_SINGLE_TURN) -DYYT_DISABLE_OUTPUT=$(YYT_DISABLE_OUTPUT) -DYYT_UART_DEBUG=$(YYT_UART_DEBUG) -DMOTOR_ZERO_ELECTRIC_ANGLE=$(MOTOR_ZERO_ELECTRIC_ANGLE) -DDRIVE_AUTO_ZERO_HOLD=$(DRIVE_AUTO_ZERO_HOLD) -DDRIVE_AUTO_ZERO_OUTPUT_SIGN=$(DRIVE_AUTO_ZERO_OUTPUT_SIGN) -DDRIVE_AUTO_ZERO_HOLD_KP=$(DRIVE_AUTO_ZERO_HOLD_KP) -DDRIVE_AUTO_ZERO_HOLD_KI=$(DRIVE_AUTO_ZERO_HOLD_KI) -DDRIVE_AUTO_ZERO_HOLD_KD=$(DRIVE_AUTO_ZERO_HOLD_KD) -DDRIVE_AUTO_ZERO_HOLD_LIMIT=$(DRIVE_AUTO_ZERO_HOLD_LIMIT) -DDRIVE_AUTO_ZERO_APPROACH_RAD=$(DRIVE_AUTO_ZERO_APPROACH_RAD) -DDRIVE_AUTO_ZERO_APPROACH_VELOCITY=$(DRIVE_AUTO_ZERO_APPROACH_VELOCITY) -DDRIVE_AUTO_ZERO_APPROACH_VOLTAGE=$(DRIVE_AUTO_ZERO_APPROACH_VOLTAGE) -DDRIVE_AUTO_ZERO_DEADBAND_RAD=$(DRIVE_AUTO_ZERO_DEADBAND_RAD) -DDRIVE_AUTO_ZERO_HOLD_DURATION_US=$(DRIVE_AUTO_ZERO_HOLD_DURATION_US) -DDRIVE_AUTO_ZERO_START_DELAY_US=$(DRIVE_AUTO_ZERO_START_DELAY_US) -DMOTOR_AUTO_ELECTRIC_ZERO=$(MOTOR_AUTO_ELECTRIC_ZERO) -DMOTOR_ALIGN_VOLTAGE=$(MOTOR_ALIGN_VOLTAGE) -DMOTOR_AUTO_ELECTRIC_ZERO_OFFSET=$(MOTOR_AUTO_ELECTRIC_ZERO_OFFSET) -DMOTOR_SENSOR_DIRECTION=$(MOTOR_SENSOR_DIRECTION) -DMOTOR_POLE_PAIRS=$(MOTOR_POLE_PAIRS) -DMOTOR_SKIP_BOOT_SWEEP=$(MOTOR_SKIP_BOOT_SWEEP) -DMOTOR_ALIGN_ONLY=$(MOTOR_ALIGN_ONLY) -DFOC_MODULATION_LIMIT=$(FOC_MODULATION_LIMIT) -DCAN_SPIN_TEST_VOLTAGE=$(CAN_SPIN_TEST_VOLTAGE) -DCAN_SPIN_TEST_VELOCITY=$(CAN_SPIN_TEST_VELOCITY) -DCAN_PHASE_SCAN_ENABLE=$(CAN_PHASE_SCAN_ENABLE) -DCAN_MAX_COMMAND_VOLTAGE=$(CAN_MAX_COMMAND_VOLTAGE)
@@ -108,7 +112,7 @@ ASFLAGS := $(MCU) $(DEFS) $(INCLUDES) -g3
 LDSCRIPT := STM32G431CBUx_FLASH.ld
 LDFLAGS := $(MCU) -T$(LDSCRIPT) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections -specs=nano.specs -specs=nosys.specs -lc -lm
 
-.PHONY: all clean flash flash-id erase probe ids ids-single-turn id6-zero-hold-current flash-id6-zero-hold-current id5-zero-hold-current flash-id5-zero-hold-current id5-uart-debug flash-id5-uart-debug
+.PHONY: all clean flash flash-id flash-sweep-align-id sweep-align-id erase probe ids ids-single-turn ids-sweep-align id6-zero-hold-current flash-id6-zero-hold-current id5-zero-hold-current flash-id5-zero-hold-current id5-uart-debug flash-id5-uart-debug
 
 all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
 	$(SZ) $(BUILD_DIR)/$(TARGET).elf
@@ -135,6 +139,13 @@ flash: all
 
 flash-id:
 	$(MAKE) DRIVE_ID=$(DRIVE_ID) flash
+
+sweep-align-id:
+	$(MAKE) clean
+	$(MAKE) DRIVE_ID=$(DRIVE_ID) MOTOR_ALIGN_ONLY=1 MOTOR_POLE_PAIRS=$(SWEEP_ALIGN_POLE_PAIRS) MOTOR_ALIGN_VOLTAGE=$(SWEEP_ALIGN_VOLTAGE) FOC_MODULATION_LIMIT=$(SWEEP_ALIGN_FOC_MODULATION_LIMIT) CAN_MAX_COMMAND_VOLTAGE=$(SWEEP_ALIGN_CAN_MAX_COMMAND_VOLTAGE) DRIVE_AUTO_ZERO_HOLD=0 YYT_DISABLE_OUTPUT=0 all
+
+flash-sweep-align-id: sweep-align-id
+	openocd -f interface/stlink.cfg -f target/stm32g4x.cfg -c "adapter speed 100; program $(BUILD_DIR)/$(TARGET).bin 0x08000000 verify reset exit"
 
 id6-zero-hold-current:
 	$(MAKE) clean
@@ -179,6 +190,17 @@ ids-single-turn:
 		cp $(BUILD_DIR)/$(TARGET).elf firmware_ids_single_turn/$(TARGET)_id$$id.elf; \
 		cp $(BUILD_DIR)/$(TARGET).hex firmware_ids_single_turn/$(TARGET)_id$$id.hex; \
 		cp $(BUILD_DIR)/$(TARGET).bin firmware_ids_single_turn/$(TARGET)_id$$id.bin; \
+	done
+
+ids-sweep-align:
+	@rm -rf firmware_ids_sweep_align
+	@mkdir -p firmware_ids_sweep_align
+	@for id in 1 2 5 6; do \
+		echo "Building DRIVE_ID=$$id sweep-align voltage executor"; \
+		$(MAKE) --no-print-directory DRIVE_ID=$$id sweep-align-id >/dev/null; \
+		cp $(BUILD_DIR)/$(TARGET).elf firmware_ids_sweep_align/$(TARGET)_id$$id_sweep_align.elf; \
+		cp $(BUILD_DIR)/$(TARGET).hex firmware_ids_sweep_align/$(TARGET)_id$$id_sweep_align.hex; \
+		cp $(BUILD_DIR)/$(TARGET).bin firmware_ids_sweep_align/$(TARGET)_id$$id_sweep_align.bin; \
 	done
 
 probe:

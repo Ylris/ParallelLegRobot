@@ -17,9 +17,9 @@
 
 ## 固件安全策略
 
-- 当前现场测试构建上电 `armed=true`，但默认命令仍为 0 mV。
-- 恢复保守 bring-up 配置时，应改回上电 `disarmed`，再通过 `arm` 允许输出电压。
-- `test` 只允许 ID1/2/5/6，持续时间限制为 20 到 300 ms。
+- 当前构建上电 `disarmed`，默认命令为 0 mV，不会主动点动或自动保持姿态。
+- 需要通过 `arm` 显式允许腿电机输出电压。
+- `test` 只允许 ID1/2/5/6，持续时间限制为 20 到 500 ms。当前非零点动电压会限制到 `+/-6000..12000 mV`。
 - `height` 高度保持必须先完成 ID1/2/5/6 四个关节的 `test` 点动，再输入 `confirm_dirs`。
 - 如果某个关节方向反了，可以先用 `invert <id>` 临时翻转，或者用 `sign <id> <1|-1>` 指定方向；修改方向后需要重新点动确认。
 - 任一腿电机离线、关节超过软限位、CAN 发送失败、CAN 总线错误、或者 `disarm/stop`，高度保持都会停止并清零输出。
@@ -47,7 +47,7 @@ pio device monitor -p /dev/cu.usbmodem1301 -b 115200
 正常启动后会周期性看到：
 
 ```text
-online: ID1=yes ID2=yes ID5=yes ID6=yes armed=yes hold=off
+online: ID1=yes ID2=yes ID5=yes ID6=yes armed=no hold=off
 ```
 
 输入：
@@ -100,30 +100,30 @@ python3 tools/leg_test_sequence.py --port /dev/cu.usbmodem1301 --log logs/my_leg
 
 ```text
 arm
-test 1 80 100
+test 1 6000 100
 stop
 ```
 
 观察 ID1 是否轻微动一下，电流是否异常。`test` 结束后会打印 `q_before`、`q_after`、`dq`，把 `dq` 的正负记下来。然后依次测：
 
 ```text
-test 2 80 100
-test 5 80 100
-test 6 80 100
+test 2 6000 100
+test 5 6000 100
+test 6 6000 100
 ```
 
 如果方向反了，先不要输入 `confirm_dirs`。例如 ID2 方向反了，输入：
 
 ```text
 invert 2
-test 2 80 100
+test 2 6000 100
 ```
 
 也可以直接指定方向：
 
 ```text
 sign 2 -1
-test 2 80 100
+test 2 6000 100
 ```
 
 注意：这个方向修改是运行时临时修改，重启后会恢复固件默认值。等四个方向都确认稳定后，再把最终 sign 固化进代码。

@@ -19,7 +19,50 @@ Physical positions are recorded in the side-view drawing coordinates used during
 | left-leg wheel | 3 | wheel motor |
 | right-leg wheel | 4 | wheel motor |
 
-## Flashed leg drive IDs
+## Current recommended leg-drive route
+
+For the current bring-up, tune the YYT MiniOdrive boards as bottom-level
+voltage actuators first:
+
+- build each board with `MOTOR_ALIGN_ONLY=1`
+- let the drive run sweep-align at power-up
+- keep `DRIVE_AUTO_ZERO_HOLD=0`
+- command the motor only through CAN mV voltage commands
+- let the ESP32-C3 main controller handle joint direction checks, leg height,
+  and later whole-body control
+
+Build one drive while ST-Link is physically connected to that exact YYT board:
+
+```sh
+cd /Users/ylris/轮腿/ParallelLegRobot
+make -C DriveFirmware DRIVE_ID=2 sweep-align-id
+openocd -f interface/stlink.cfg -f target/stm32g4x.cfg \
+  -c "adapter speed 100; init; reset halt; program DriveFirmware/build/turing_CBU6.bin 0x08000000 verify reset; shutdown"
+```
+
+Replace `DRIVE_ID=2` with `1`, `5`, or `6` only after moving ST-Link to that
+physical board.
+
+After flashing, verify through the ESP32 serial console:
+
+```text
+status
+can
+arm
+test 2 6000 100
+test 2 -6000 100
+stop
+disarm
+```
+
+Expected result: the tested ID is online, positive and negative pulses produce
+opposite `dq` signs with similar magnitude, and CAN `tx_fail` does not keep
+increasing.
+
+The table below records older packaged ID builds. Treat it as history unless a
+handoff note explicitly says those files were just flashed.
+
+## Packaged legacy leg-drive IDs
 
 | Joint | Drive ID | Firmware |
 | --- | ---: | --- |
