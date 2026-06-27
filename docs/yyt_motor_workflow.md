@@ -26,6 +26,8 @@ voltage actuators first:
 
 - build each board with `MOTOR_ALIGN_ONLY=1`
 - let the drive run sweep-align at power-up
+- average multiple encoder samples after the rotor settles before saving the
+  electrical zero
 - keep `DRIVE_AUTO_ZERO_HOLD=0`
 - command the motor only through CAN mV voltage commands
 - let the ESP32-C3 main controller handle joint direction checks, leg height,
@@ -58,6 +60,16 @@ disarm
 Expected result: the tested ID is online, positive and negative pulses produce
 opposite `dq` signs with similar magnitude, and CAN `tx_fail` does not keep
 increasing.
+
+Current sweep-align zero sampling defaults:
+
+| Parameter | Value | Meaning |
+| --- | ---: | --- |
+| `MOTOR_ALIGN_AVG_SAMPLES` | `32` | number of encoder samples after settle |
+| `MOTOR_ALIGN_AVG_DELAY_MS` | `2U` | delay between samples |
+
+The firmware uses a circular average of the sampled electrical angle, so values
+near 0 and 2π are averaged correctly.
 
 The table below records older packaged ID builds. Treat it as history unless a
 handoff note explicitly says those files were just flashed.

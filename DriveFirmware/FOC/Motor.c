@@ -7,6 +7,30 @@ float shaft_angle=0,open_loop_timestamp=0;
 #define MOTOR_SKIP_BOOT_SWEEP 0
 #endif
 
+static float readAveragedElectricZero(void)
+{
+	float sin_sum = 0.0f;
+	float cos_sum = 0.0f;
+	int samples = MOTOR_ALIGN_AVG_SAMPLES;
+
+	if (samples < 1) {
+		samples = 1;
+	}
+
+	for (int i = 0; i < samples; i++) {
+		float electric_angle = _normalizeAngle((float)(sensor_direction * pole_pairs) *
+		                                       MT6816_Get_AngleData() +
+		                                       MOTOR_AUTO_ELECTRIC_ZERO_OFFSET);
+		sin_sum += sinf(electric_angle);
+		cos_sum += cosf(electric_angle);
+		if (MOTOR_ALIGN_AVG_DELAY_MS > 0U) {
+			HAL_Delay(MOTOR_ALIGN_AVG_DELAY_MS);
+		}
+	}
+
+	return _normalizeAngle(atan2f(sin_sum, cos_sum));
+}
+
 
 void Motor_init()
 {
@@ -38,7 +62,7 @@ void Motor_init()
 	/* Hold at target angle and let rotor fully settle */
 	setPhaseVoltage(MOTOR_ALIGN_VOLTAGE, 0, _3PI_2);
 	HAL_Delay(500);
-	zero_electric_angle = _normalizeAngle((float)(sensor_direction * pole_pairs) * MT6816_Get_AngleData() + MOTOR_AUTO_ELECTRIC_ZERO_OFFSET);
+	zero_electric_angle = readAveragedElectricZero();
 	setPhaseVoltage(0, 0, _3PI_2);
 	return;
 #endif
@@ -68,7 +92,7 @@ void Motor_init()
 	setPhaseVoltage(MOTOR_ALIGN_VOLTAGE, 0,_3PI_2);
 	HAL_Delay(300);
 #if MOTOR_AUTO_ELECTRIC_ZERO
-	zero_electric_angle = _normalizeAngle((float)(sensor_direction * pole_pairs) * MT6816_Get_AngleData() + MOTOR_AUTO_ELECTRIC_ZERO_OFFSET);
+	zero_electric_angle = readAveragedElectricZero();
 #else
 	zero_electric_angle=MOTOR_ZERO_ELECTRIC_ANGLE;
 #endif
